@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct InPlayerClipBar: View {
     @ObservedObject var viewModel: PlayerViewModel

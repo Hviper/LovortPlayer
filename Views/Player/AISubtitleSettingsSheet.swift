@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel

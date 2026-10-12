@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct LANUploadSheet: View {
     @State private var isServerRunning: Bool = false

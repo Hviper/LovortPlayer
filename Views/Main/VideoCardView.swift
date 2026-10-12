@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct VideoCardView: View {
     public let video: VideoItem

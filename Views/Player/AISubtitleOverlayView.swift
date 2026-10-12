@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct AISubtitleOverlayView: View {
     public let subtitle: SubtitleLine?

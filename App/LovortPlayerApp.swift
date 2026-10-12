@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerUI
 
 @main
 struct LovortPlayerApp: App {

@@ -1,5 +1,4 @@
 import SwiftUI
-import LovortPlayerCore
 
 public struct FullscreenVideoPlayerView: View {
     @StateObject public var viewModel = PlayerViewModel()
