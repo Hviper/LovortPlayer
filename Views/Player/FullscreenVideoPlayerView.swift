@@ -9,12 +9,12 @@ public struct FullscreenVideoPlayerView: View {
     public let videoTitle: String
     public var onDismiss: () -> Void
 
-    // 局部手势状态
+    // 局部手势与状态
     @State private var gestureIndicatorText: String?
     @State private var gestureIndicatorIcon: String?
     @State private var panStartTime: TimeInterval = 0
     @State private var panTargetTime: TimeInterval = 0
-    @State private var initialBrightness: CGFloat = 0.5
+    @State private var isLandscape: Bool = false
 
     public init(videoURL: URL, videoTitle: String, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
@@ -110,6 +110,9 @@ public struct FullscreenVideoPlayerView: View {
             viewModel.togglePlayPause()
         }
         .onDisappear {
+            #if os(iOS)
+            rotateToOrientation(.portrait)
+            #endif
             viewModel.cleanup()
         }
         .sheet(isPresented: $viewModel.showAISubtitlePanel) {
@@ -125,7 +128,7 @@ public struct FullscreenVideoPlayerView: View {
 
     // MARK: - 顶部导航条
     private var topNavigationBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             Button(action: onDismiss) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 16, weight: .semibold))
@@ -178,7 +181,7 @@ public struct FullscreenVideoPlayerView: View {
         .padding(.top, 16)
     }
 
-    // MARK: - 底部控制条 (Lovort 质感)
+    // MARK: - 底部控制条 (Lovort 质感，集成倍速与横竖屏切换)
     private var bottomControlsBar: some View {
         VStack(spacing: 12) {
             // 时间进度滑动条
@@ -203,31 +206,65 @@ public struct FullscreenVideoPlayerView: View {
                     .foregroundColor(.white.opacity(0.7))
             }
 
-            // 播放与快进操作按键
-            HStack(spacing: 36) {
-                Button(action: { viewModel.rewind(by: 10) }) {
-                    Image(systemName: "gobackward.10")
-                        .font(.system(size: 20))
-                        .foregroundColor(.white.opacity(0.9))
+            // 播放与操作按键区（倍速、快退、播放/暂停、快进、横竖屏旋转）
+            HStack {
+                // 自定义倍速选择菜单
+                Menu {
+                    Button("0.5x") { viewModel.setPlaybackRate(0.5) }
+                    Button("0.75x") { viewModel.setPlaybackRate(0.75) }
+                    Button("1.0x (正常)") { viewModel.setPlaybackRate(1.0) }
+                    Button("1.25x") { viewModel.setPlaybackRate(1.25) }
+                    Button("1.5x") { viewModel.setPlaybackRate(1.5) }
+                    Button("2.0x") { viewModel.setPlaybackRate(2.0) }
+                    Button("3.0x") { viewModel.setPlaybackRate(3.0) }
+                } label: {
+                    Text(viewModel.playbackRate == 1.0 ? "倍速" : "\(String(format: "%.2gx", viewModel.playbackRate))")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(viewModel.playbackRate == 1.0 ? .white.opacity(0.85) : .cyan)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.white.opacity(0.12)))
                 }
 
-                Button(action: { viewModel.togglePlayPause() }) {
-                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 26))
-                        .foregroundColor(.white)
-                        .frame(width: 54, height: 54)
-                        .background(Circle().fill(Color.white.opacity(0.18)))
+                Spacer()
+
+                HStack(spacing: 32) {
+                    Button(action: { viewModel.rewind(by: 10) }) {
+                        Image(systemName: "gobackward.10")
+                            .font(.system(size: 20))
+                            .foregroundColor(.white.opacity(0.9))
+                    }
+
+                    Button(action: { viewModel.togglePlayPause() }) {
+                        Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 26))
+                            .foregroundColor(.white)
+                            .frame(width: 52, height: 52)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+
+                    Button(action: { viewModel.fastForward(by: 10) }) {
+                        Image(systemName: "goforward.10")
+                            .font(.system(size: 20))
+                            .foregroundColor(.white.opacity(0.9))
+                    }
                 }
 
-                Button(action: { viewModel.fastForward(by: 10) }) {
-                    Image(systemName: "goforward.10")
-                        .font(.system(size: 20))
-                        .foregroundColor(.white.opacity(0.9))
+                Spacer()
+
+                // 横竖屏一键旋转切换按钮
+                Button(action: toggleOrientation) {
+                    Image(systemName: isLandscape ? "iphone.portrait" : "iphone.landscape")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(8)
+                        .background(Circle().fill(Color.white.opacity(0.12)))
                 }
             }
+            .padding(.horizontal, 4)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.vertical, 14)
         .background(
             RoundedRectangle(cornerRadius: 22)
                 .fill(.ultraThinMaterial)
@@ -238,10 +275,23 @@ public struct FullscreenVideoPlayerView: View {
                 )
         )
         .padding(.horizontal, 16)
-        .padding(.bottom, 32)
+        .padding(.bottom, 24)
     }
 
     #if os(iOS)
+    private func toggleOrientation() {
+        isLandscape.toggle()
+        rotateToOrientation(isLandscape ? .landscapeRight : .portrait)
+    }
+
+    private func rotateToOrientation(_ orientation: UIInterfaceOrientationMask) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: orientation)
+        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+            print("Failed to rotate orientation: \(error)")
+        }
+    }
+
     private func handlePanGesture(_ value: DragGesture.Value) {
         let screenWidth = UIScreen.main.bounds.width
         let translation = value.translation

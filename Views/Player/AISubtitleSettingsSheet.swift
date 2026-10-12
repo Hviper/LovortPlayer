@@ -2,12 +2,14 @@ import SwiftUI
 
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
+    @StateObject private var authManager = AuthManager.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var apiKey: String = ""
     @State private var selectedSourceLanguage: String = "自动检测"
     @State private var selectedTargetLanguage: String = "中文 (简体)"
-    @State private var selectedEngine: String = "OpenAI Whisper 云端识别"
+    @State private var isLoggingIn: Bool = false
+    @State private var loginMessage: String? = nil
 
     public init(viewModel: PlayerViewModel) {
         self.viewModel = viewModel
@@ -26,7 +28,7 @@ public struct AISubtitleSettingsSheet: View {
                                 Text("AI 实时双语字幕")
                                     .font(.system(size: 16, weight: .semibold))
                                     .foregroundColor(.white)
-                                Text("自动识别视频中语音，生成双语对照字幕")
+                                Text("开启后，视频播放时画面底部将浮动显示双语字幕")
                                     .font(.system(size: 12))
                                     .foregroundColor(.white.opacity(0.5))
                             }
@@ -41,40 +43,116 @@ public struct AISubtitleSettingsSheet: View {
                                 .fill(Color.white.opacity(0.06))
                         )
 
-                        // 立即生成按钮
-                        Button(action: {
-                            viewModel.generateAISubtitles()
-                        }) {
-                            HStack {
-                                if viewModel.isGeneratingSubtitles {
-                                    ProgressView()
-                                        .tint(.black)
-                                        .padding(.trailing, 4)
-                                    Text("正在抽取音频并调用 AI 转录...")
-                                        .font(.system(size: 14, weight: .semibold))
-                                } else {
-                                    Image(systemName: "sparkles")
-                                    Text(viewModel.subtitles.isEmpty ? "立即提取并生成双语字幕" : "重新生成字幕 (\(viewModel.subtitles.count) 句已加载)")
-                                        .font(.system(size: 14, weight: .semibold))
-                                }
-                            }
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14)
-                                    .fill(Color.cyan)
-                            )
-                        }
-                        .disabled(viewModel.isGeneratingSubtitles)
-
-                        // OpenAI API Key 配置输入
+                        // 核心操作：生成/重新提取当前视频字幕
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("OpenAI API Key (可选)")
+                            Button(action: {
+                                viewModel.generateAISubtitles()
+                            }) {
+                                HStack {
+                                    if viewModel.isGeneratingSubtitles {
+                                        ProgressView()
+                                            .tint(.black)
+                                            .padding(.trailing, 4)
+                                        Text("正在抽取音轨并生成字幕...")
+                                            .font(.system(size: 14, weight: .semibold))
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                        Text(viewModel.subtitles.isEmpty ? "立即提取并生成双语字幕" : "重新生成字幕 (当前已就绪 \(viewModel.subtitles.count) 句)")
+                                            .font(.system(size: 14, weight: .semibold))
+                                    }
+                                }
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .fill(Color.cyan)
+                                )
+                            }
+                            .disabled(viewModel.isGeneratingSubtitles)
+
+                            Text(viewModel.subtitles.isEmpty ? "💡 提示：点击后将分析视频音频并生成带时间轴的对应双语字幕，返回播放即可看到画面字幕。" : "✅ 字幕已装载，继续播放视频，画面下方会自动随进度高亮当前句。")
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.45))
+                                .padding(.horizontal, 4)
+                        }
+
+                        // 账户与 AI 额度解锁 (ChatGPT / Antigravity OAuth 登录)
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("AI 额度与账号授权")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.white.opacity(0.5))
 
-                            SecureField("sk-... (未填写时使用声纹模拟双语流)", text: $apiKey)
+                            if let profile = authManager.currentProfile, profile.isLoggedIn {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 6) {
+                                            Circle().fill(Color.green).frame(width: 8, height: 8)
+                                            Text(profile.username)
+                                                .font(.system(size: 14, weight: .semibold))
+                                                .foregroundColor(.white)
+                                        }
+                                        Text("配额: \(profile.quotaRemaining)")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.cyan)
+                                    }
+                                    Spacer()
+                                    Button(action: { authManager.logout() }) {
+                                        Text("退出")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.white.opacity(0.6))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .background(Capsule().fill(Color.white.opacity(0.1)))
+                                    }
+                                }
+                            } else {
+                                VStack(spacing: 10) {
+                                    Button(action: { login(provider: .chatgpt) }) {
+                                        HStack {
+                                            Image(systemName: "person.badge.key.fill")
+                                            Text("登录 ChatGPT 账号 (解锁 Whisper 额度)")
+                                                .font(.system(size: 13, weight: .semibold))
+                                        }
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 11)
+                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.1)))
+                                    }
+
+                                    Button(action: { login(provider: .antigravity) }) {
+                                        HStack {
+                                            Image(systemName: "bolt.shield.fill")
+                                            Text("登录 Antigravity 账号 (解锁极速云端翻译)")
+                                                .font(.system(size: 13, weight: .semibold))
+                                        }
+                                        .foregroundColor(.cyan)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 11)
+                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.cyan.opacity(0.1)))
+                                    }
+                                }
+                            }
+
+                            if let msg = loginMessage {
+                                Text(msg)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.green)
+                            }
+                        }
+                        .padding(16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(Color.white.opacity(0.06))
+                        )
+
+                        // 手动 API Key (备用方式)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("或使用自备 API Key")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white.opacity(0.5))
+
+                            SecureField("sk-... (OpenAI API Key)", text: $apiKey)
                                 .font(.system(size: 13, design: .monospaced))
                                 .foregroundColor(.white)
                                 .padding(12)
@@ -89,14 +167,14 @@ public struct AISubtitleSettingsSheet: View {
                                 .fill(Color.white.opacity(0.06))
                         )
 
-                        // 语言配置卡片
+                        // 语言偏好设置
                         VStack(alignment: .leading, spacing: 14) {
-                            Text("语言偏好")
+                            Text("语言设置")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.white.opacity(0.4))
 
                             HStack {
-                                Text("识别源语言")
+                                Text("原音源语言")
                                     .foregroundColor(.white.opacity(0.85))
                                 Spacer()
                                 Menu(selectedSourceLanguage) {
@@ -127,30 +205,12 @@ public struct AISubtitleSettingsSheet: View {
                             RoundedRectangle(cornerRadius: 16)
                                 .fill(Color.white.opacity(0.06))
                         )
-
-                        // 驱动引擎
-                        VStack(alignment: .leading, spacing: 14) {
-                            Text("驱动引擎")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(.white.opacity(0.4))
-
-                            Picker("驱动引擎", selection: $selectedEngine) {
-                                Text("OpenAI Whisper").tag("OpenAI Whisper 云端识别")
-                                Text("WhisperKit 本地").tag("WhisperKit 本地")
-                            }
-                            .pickerStyle(.segmented)
-                        }
-                        .padding(16)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(Color.white.opacity(0.06))
-                        )
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 24)
                 }
             }
-            .navigationTitle("AI 字幕配置")
+            .navigationTitle("AI 字幕选项")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -164,6 +224,19 @@ public struct AISubtitleSettingsSheet: View {
             }
             .onAppear {
                 self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
+            }
+        }
+    }
+
+    private func login(provider: AuthProvider) {
+        Task {
+            isLoggingIn = true
+            let ok = await authManager.loginWithProvider(provider)
+            isLoggingIn = false
+            if ok {
+                withAnimation {
+                    loginMessage = "登录成功，已关联 \(provider == .chatgpt ? "ChatGPT" : "Antigravity") 专属额度！"
+                }
             }
         }
     }

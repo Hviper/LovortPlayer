@@ -4,6 +4,8 @@ public struct LANUploadSheet: View {
     @State private var isServerRunning: Bool = false
     @State private var ipAddress: String = "正在检测局域网..."
     @State private var serverPort: UInt16 = 8080
+    @State private var receivedFilesCount: Int = 0
+    @State private var latestFileName: String? = nil
     @Environment(\.dismiss) private var dismiss
 
     public init() {}
@@ -13,23 +15,23 @@ public struct LANUploadSheet: View {
             ZStack {
                 Color(red: 0.04, green: 0.04, blue: 0.05).ignoresSafeArea()
 
-                VStack(spacing: 28) {
+                VStack(spacing: 24) {
                     // 状态图标
                     ZStack {
                         Circle()
                             .fill(Color.cyan.opacity(0.12))
-                            .frame(width: 90, height: 90)
+                            .frame(width: 80, height: 80)
                         Image(systemName: "wifi")
-                            .font(.system(size: 38, weight: .semibold))
+                            .font(.system(size: 34, weight: .semibold))
                             .foregroundColor(.cyan)
                     }
-                    .padding(.top, 24)
+                    .padding(.top, 20)
 
                     VStack(spacing: 8) {
                         Text("局域网免数据线直传")
                             .font(.system(size: 20, weight: .bold))
                             .foregroundColor(.white)
-                        Text("在同一 Wi-Fi 下，电脑浏览器访问下方地址即可拖拽传视频")
+                        Text("手机与电脑连接同一 Wi-Fi，电脑浏览器访问下方地址即可拖拽传视频")
                             .font(.system(size: 13))
                             .foregroundColor(.white.opacity(0.6))
                             .multilineTextAlignment(.center)
@@ -47,11 +49,11 @@ public struct LANUploadSheet: View {
                             .foregroundColor(.cyan)
                             .textSelection(.enabled)
 
-                        Text("支持 MKV, MP4, MOV, AVI 多格式")
+                        Text("已支持电脑拖拽，传输完毕后手机将自动落盘入库")
                             .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.4))
                     }
-                    .padding(.vertical, 20)
+                    .padding(.vertical, 18)
                     .frame(maxWidth: .infinity)
                     .background(
                         RoundedRectangle(cornerRadius: 18)
@@ -62,6 +64,37 @@ public struct LANUploadSheet: View {
                             )
                     )
                     .padding(.horizontal, 20)
+
+                    // 实时接收状态卡片
+                    if let latest = latestFileName {
+                        HStack(spacing: 12) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.system(size: 18))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("刚收到新视频")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.white.opacity(0.5))
+                                Text(latest)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding(14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14)
+                                .fill(Color.green.opacity(0.12))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(Color.green.opacity(0.2), lineWidth: 1)
+                                )
+                        )
+                        .padding(.horizontal, 20)
+                        .transition(.scale.combined(with: .opacity))
+                    }
 
                     // 启停按钮
                     Button(action: toggleServer) {
@@ -99,6 +132,14 @@ public struct LANUploadSheet: View {
         }
         .onAppear {
             startService()
+            LANServerManager.shared.onFileReceived = { [self] url, name in
+                Task { @MainActor in
+                    withAnimation {
+                        self.receivedFilesCount += 1
+                        self.latestFileName = name
+                    }
+                }
+            }
         }
     }
 

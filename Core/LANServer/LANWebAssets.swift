@@ -83,8 +83,22 @@ public struct LANWebAssets {
             .file-list {
                 margin-top: 24px;
                 text-align: left;
-                font-size: 13px;
-                color: rgba(255,255,255,0.7);
+                font-size: 14px;
+                color: rgba(255,255,255,0.85);
+            }
+            .file-item {
+                background: rgba(255,255,255,0.05);
+                border-radius: 10px;
+                padding: 10px 14px;
+                margin-bottom: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .file-success {
+                color: #00F2FE;
+                font-weight: 600;
+                font-size: 12px;
             }
         </style>
     </head>
@@ -133,18 +147,27 @@ public struct LANWebAssets {
                         if (e.lengthComputable) {
                             const percent = Math.round((e.loaded / e.total) * 100);
                             progressFill.style.width = percent + '%';
-                            progressText.innerText = '正在上传 ' + file.name + ' (' + percent + '%)';
+                            if (percent >= 100) {
+                                progressText.innerText = '传输完毕，手机端正在保存入库...';
+                            } else {
+                                progressText.innerText = '正在上传 ' + file.name + ' (' + percent + '%)';
+                            }
                         }
                     };
                     xhr.onload = () => {
                         if (xhr.status === 200) {
-                            progressText.innerText = '上传成功: ' + file.name;
+                            progressText.innerText = '✅ 传输成功！手机端已自动存入媒体库';
+                            progressFill.style.width = '100%';
                             const item = document.createElement('div');
-                            item.innerText = '✓ ' + file.name;
+                            item.className = 'file-item';
+                            item.innerHTML = '<span>' + file.name + '</span><span class="file-success">已保存到 iPhone</span>';
                             fileList.appendChild(item);
                         } else {
-                            progressText.innerText = '上传失败';
+                            progressText.innerText = '❌ 上传失败，请检查网络连接';
                         }
+                    };
+                    xhr.onerror = () => {
+                        progressText.innerText = '❌ 网络异常中断';
                     };
                     xhr.send(file);
                 });
