@@ -21,12 +21,12 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
 
         if !proxyHost.isEmpty && proxyPort > 0 {
             config.connectionProxyDictionary = [
-                kCFNetworkProxiesHTTPEnable as String: true,
-                kCFNetworkProxiesHTTPProxy as String: proxyHost,
-                kCFNetworkProxiesHTTPPort as String: proxyPort,
-                kCFNetworkProxiesHTTPSEnable as String: true,
-                kCFNetworkProxiesHTTPSProxy as String: proxyHost,
-                kCFNetworkProxiesHTTPSPort as String: proxyPort
+                "HTTPEnable": 1,
+                "HTTPProxy": proxyHost,
+                "HTTPPort": proxyPort,
+                "HTTPSEnable": 1,
+                "HTTPSProxy": proxyHost,
+                "HTTPSPort": proxyPort
             ]
         }
         return URLSession(configuration: config)
