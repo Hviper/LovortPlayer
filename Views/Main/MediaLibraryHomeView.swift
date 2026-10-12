@@ -12,6 +12,10 @@ public struct MediaLibraryHomeView: View {
     @State private var isAuthenticatingVault: Bool = false
     @State private var filterTab: Int = 0 // 0: 全部, 1: 精彩剪辑, 2: 隐私保险箱
     @State private var isFileImporterPresented: Bool = false
+    @State private var showPinDialog: Bool = false
+    @State private var pinInput: String = ""
+    @State private var isDecoySpace: Bool = false
+
     #if os(iOS)
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     #endif
@@ -19,6 +23,11 @@ public struct MediaLibraryHomeView: View {
     public init() {}
 
     private var filteredVideos: [VideoItem] {
+        if isDecoySpace {
+            // 诱导假密码模式：反侦察，显示空的假空间
+            return []
+        }
+
         switch filterTab {
         case 1:
             // 精彩剪辑
@@ -110,6 +119,25 @@ public struct MediaLibraryHomeView: View {
                     }
                 }
             }
+            .alert("输入保险箱密码", isPresented: $showPinDialog) {
+                SecureField("输入4位密码", text: $pinInput)
+                Button("验证") {
+                    let verify = VaultManager.shared.verifyPassword(pinInput)
+                    if verify.success {
+                        withAnimation {
+                            showVaultUnlocked = true
+                            isDecoySpace = verify.isDecoy
+                            filterTab = 2
+                        }
+                    }
+                    pinInput = ""
+                }
+                Button("取消", role: .cancel) {
+                    pinInput = ""
+                }
+            } message: {
+                Text("输入安全密码以解锁保密视频")
+            }
         }
     }
 
@@ -118,7 +146,7 @@ public struct MediaLibraryHomeView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(filterTab == 2 ? "私密保险箱" : "媒体库")
+                    Text(filterTab == 2 ? (isDecoySpace ? "访客空间" : "私密保险箱") : "媒体库")
                         .font(.system(size: 26, weight: .bold))
                         .foregroundColor(filterTab == 2 || showVaultUnlocked ? .cyan : .white)
 
@@ -128,7 +156,7 @@ public struct MediaLibraryHomeView: View {
                             .foregroundColor(.cyan)
                     }
                 }
-                Text(showVaultUnlocked ? "私密空间已解锁 (\(filteredVideos.count))" : "本地视频 (\(filteredVideos.count))")
+                Text(showVaultUnlocked ? "AES-256 空间已解锁 (\(filteredVideos.count))" : "本地视频 (\(filteredVideos.count))")
                     .font(.system(size: 12))
                     .foregroundColor(.white.opacity(0.5))
             }
@@ -205,7 +233,7 @@ public struct MediaLibraryHomeView: View {
     private func tabButton(title: String, index: Int) -> some View {
         Button(action: {
             if index == 2 && !showVaultUnlocked {
-                // 点击私密保险箱时触发 Face ID 验证
+                // 点击私密保险箱时触发 Face ID 验证或弹窗
                 triggerVaultBiometrics()
             } else {
                 withAnimation {
@@ -253,8 +281,12 @@ public struct MediaLibraryHomeView: View {
             if result.success {
                 withAnimation {
                     showVaultUnlocked = true
+                    isDecoySpace = false
                     filterTab = 2
                 }
+            } else {
+                // 生物识别失败或不可用时，弹密码输入框（支持真/假诱导密码）
+                showPinDialog = true
             }
         }
     }

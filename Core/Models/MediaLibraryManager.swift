@@ -101,17 +101,21 @@ public final class MediaLibraryManager: ObservableObject {
             }
         }
 
+        // 关联历史播放进度
+        let lastPos = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
+
         return VideoItem(
             title: url.lastPathComponent,
             fileURL: url,
             duration: duration,
             fileSize: size,
             isHidden: isHidden,
-            createdAt: date
+            createdAt: date,
+            lastPlayedPosition: lastPos
         )
     }
 
-    /// 导入外部文件（如相册或系统文件选择器）
+    /// 导入外部文件
     public func importFile(from sourceURL: URL, isHidden: Bool = false) async throws {
         let destFolder = isHidden ? vaultDirectory : documentsDirectory
         let destURL = destFolder.appendingPathComponent(sourceURL.lastPathComponent)
@@ -130,15 +134,31 @@ public final class MediaLibraryManager: ObservableObject {
         reloadLibrary()
     }
 
-    /// 将视频移动到保险箱 / 移出保险箱
+    /// 将视频移动到保险箱（支持真实 AES-256 加密落盘）/ 移出保险箱
     public func toggleHideVideo(_ video: VideoItem) async throws {
-        let targetFolder = video.isHidden ? documentsDirectory : vaultDirectory
-        let targetURL = targetFolder.appendingPathComponent(video.fileURL.lastPathComponent)
-
-        if fileManager.fileExists(atPath: targetURL.path) {
-            try fileManager.removeItem(at: targetURL)
+        if video.isHidden {
+            // 移出保险箱 -> 解密回 Documents
+            let destName = video.fileURL.lastPathComponent.replacingOccurrences(of: ".vault", with: "")
+            let targetURL = documentsDirectory.appendingPathComponent(destName)
+            if fileManager.fileExists(atPath: targetURL.path) {
+                try fileManager.removeItem(at: targetURL)
+            }
+            if video.fileURL.pathExtension.lowercased() == "vault" {
+                try VaultManager.shared.decryptFile(at: video.fileURL, destinationURL: targetURL)
+                try? fileManager.removeItem(at: video.fileURL)
+            } else {
+                try fileManager.moveItem(at: video.fileURL, to: targetURL)
+            }
+        } else {
+            // 移入保险箱 -> 进行 AES 加密保护并修改扩展名为 .vault
+            let destName = video.fileURL.lastPathComponent + ".vault"
+            let targetURL = vaultDirectory.appendingPathComponent(destName)
+            if fileManager.fileExists(atPath: targetURL.path) {
+                try fileManager.removeItem(at: targetURL)
+            }
+            try VaultManager.shared.encryptFile(at: video.fileURL, destinationURL: targetURL)
+            try? fileManager.removeItem(at: video.fileURL)
         }
-        try fileManager.moveItem(at: video.fileURL, to: targetURL)
         reloadLibrary()
     }
 

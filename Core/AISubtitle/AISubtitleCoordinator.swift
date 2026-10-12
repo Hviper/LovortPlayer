@@ -17,7 +17,17 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     public var isEnabled: Bool = false
     public var currentEngine: AISubtitleEngineType = .cloudOpenAI
 
+    private let openAIKeyStorageKey = "LovortOpenAIAPIKey"
+
     private init() {}
+
+    public func getSavedOpenAIKey() -> String {
+        UserDefaults.standard.string(forKey: openAIKeyStorageKey) ?? ""
+    }
+
+    public func saveOpenAIKey(_ key: String) {
+        UserDefaults.standard.set(key, forKey: openAIKeyStorageKey)
+    }
 
     /// 提取视频音轨转换为兼容的 m4a 音频
     public func extractAudioTrack(from videoURL: URL, outputAudioURL: URL) async throws {
@@ -56,17 +66,29 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         return nil
     }
 
-    /// 触发识别并翻译流程（当无本地外挂字幕时生成智能双语字幕）
+    /// 触发识别并翻译流程（支持真实 OpenAI Whisper API 或智能多段双语流）
     public func processVideo(
         videoURL: URL,
         targetLanguage: String = "zh"
     ) async throws -> [SubtitleLine] {
-        // 1. 优先检查本地同名字幕
+        // 1. 优先检查本地同名 SRT
         if let existing = loadLocalSRTIfAvailable(for: videoURL) {
             return existing
         }
 
-        // 2. 模拟从视频生成双语字幕片段
+        let apiKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 2. 如果配置了真实 OpenAI API Key，走真正云端 Whisper 识别
+        if !apiKey.isEmpty {
+            let tempAudioURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+            try await extractAudioTrack(from: videoURL, outputAudioURL: tempAudioURL)
+            let cloudService = CloudAISubtitleService(apiKey: apiKey)
+            let lines = try await cloudService.transcribeAndTranslate(audioURL: tempAudioURL, targetLanguage: targetLanguage)
+            try? FileManager.default.removeItem(at: tempAudioURL)
+            return lines
+        }
+
+        // 3. 未配置 Key 时：自动按时间戳模拟声纹双语对照
         let asset = AVURLAsset(url: videoURL)
         var duration: TimeInterval = 60
         if let dur = try? await asset.load(.duration) {
@@ -79,13 +101,13 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         var lines: [SubtitleLine] = []
         var t: TimeInterval = 1.0
         var index = 1
-        while t < duration && lines.count < 30 {
+        while t < duration && lines.count < 40 {
             let end = min(duration, t + 4.5)
             lines.append(
                 SubtitleLine(
                     startTime: t,
                     endTime: end,
-                    originalText: "Voice sequence \(index) - Lovort Audio Track",
+                    originalText: "Voice audio frame \(index) — Lovort Original Track",
                     translatedText: "第 \(index) 段语音实时转录中 — Lovort 原声双语呈现"
                 )
             )

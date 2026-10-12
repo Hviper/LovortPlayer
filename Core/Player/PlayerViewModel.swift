@@ -55,12 +55,20 @@ public final class PlayerViewModel: ObservableObject {
             self.isAISubtitleEnabled = true
         }
 
+        // 读取历史播放进度
+        let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
+
         Task {
             if let durationCM = try? await playerItem.asset.load(.duration) {
                 let seconds = CMTimeGetSeconds(durationCM)
                 if seconds.isFinite && !seconds.isNaN {
                     self.duration = seconds
                     self.clipEndTime = min(seconds, 30.0)
+
+                    // 如果有历史播放记录，自动跳转并提示
+                    if savedPosition > 3.0 && savedPosition < seconds - 5.0 {
+                        self.seek(to: savedPosition)
+                    }
                 }
             }
         }
@@ -84,6 +92,7 @@ public final class PlayerViewModel: ObservableObject {
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = time
         updateActiveSubtitle(at: time)
+        saveCurrentProgress()
     }
 
     public func fastForward(by seconds: TimeInterval = 10) {
@@ -166,6 +175,15 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
+    private func saveCurrentProgress() {
+        guard let url = currentVideoURL else { return }
+        PlaybackHistoryManager.shared.savePlaybackPosition(
+            for: url,
+            position: currentTime,
+            duration: duration
+        )
+    }
+
     private func resetControlsTimeout() {
         controlsHideTimer?.cancel()
         guard isPlaying else { return }
@@ -178,13 +196,15 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     private func setupTimeObserver() {
-        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserverToken = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             Task { @MainActor [weak self] in
                 guard let self = self, !self.isScrubbing else { return }
                 let current = CMTimeGetSeconds(time)
                 self.currentTime = current
                 self.updateActiveSubtitle(at: current)
+                // 定期记录进度
+                self.saveCurrentProgress()
             }
         }
     }
@@ -198,6 +218,8 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func cleanup() {
+        saveCurrentProgress()
+        MediaLibraryManager.shared.reloadLibrary()
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
             timeObserverToken = nil

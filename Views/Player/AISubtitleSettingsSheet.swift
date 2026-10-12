@@ -4,9 +4,10 @@ public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var apiKey: String = ""
     @State private var selectedSourceLanguage: String = "自动检测"
     @State private var selectedTargetLanguage: String = "中文 (简体)"
-    @State private var selectedEngine: String = "本地 Whisper 模型"
+    @State private var selectedEngine: String = "OpenAI Whisper 云端识别"
 
     public init(viewModel: PlayerViewModel) {
         self.viewModel = viewModel
@@ -49,7 +50,7 @@ public struct AISubtitleSettingsSheet: View {
                                     ProgressView()
                                         .tint(.black)
                                         .padding(.trailing, 4)
-                                    Text("正在抽取音频并生成字幕...")
+                                    Text("正在抽取音频并调用 AI 转录...")
                                         .font(.system(size: 14, weight: .semibold))
                                 } else {
                                     Image(systemName: "sparkles")
@@ -66,6 +67,27 @@ public struct AISubtitleSettingsSheet: View {
                             )
                         }
                         .disabled(viewModel.isGeneratingSubtitles)
+
+                        // OpenAI API Key 配置输入
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("OpenAI API Key (可选)")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white.opacity(0.5))
+
+                            SecureField("sk-... (未填写时使用声纹模拟双语流)", text: $apiKey)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(12)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                                .onChange(of: apiKey) { newValue in
+                                    AISubtitleCoordinator.shared.saveOpenAIKey(newValue)
+                                }
+                        }
+                        .padding(16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(Color.white.opacity(0.06))
+                        )
 
                         // 语言配置卡片
                         VStack(alignment: .leading, spacing: 14) {
@@ -106,15 +128,15 @@ public struct AISubtitleSettingsSheet: View {
                                 .fill(Color.white.opacity(0.06))
                         )
 
-                        // 引擎选择
+                        // 驱动引擎
                         VStack(alignment: .leading, spacing: 14) {
                             Text("驱动引擎")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.white.opacity(0.4))
 
                             Picker("驱动引擎", selection: $selectedEngine) {
-                                Text("WhisperKit (本地零网络)").tag("本地 Whisper 模型")
-                                Text("OpenAI / Cloud").tag("OpenAI / Cloud")
+                                Text("OpenAI Whisper").tag("OpenAI Whisper 云端识别")
+                                Text("WhisperKit 本地").tag("WhisperKit 本地")
                             }
                             .pickerStyle(.segmented)
                         }
@@ -139,6 +161,9 @@ public struct AISubtitleSettingsSheet: View {
                     }
                     .foregroundColor(.white.opacity(0.8))
                 }
+            }
+            .onAppear {
+                self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
             }
         }
     }

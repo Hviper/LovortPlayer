@@ -21,11 +21,16 @@ public struct VideoCardView: View {
         self.onDelete = onDelete
     }
 
+    private var progressRatio: Double {
+        guard video.duration > 0, video.lastPlayedPosition > 0 else { return 0 }
+        return min(1.0, max(0.0, video.lastPlayedPosition / video.duration))
+    }
+
     public var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 10) {
-                // 16:9 封面卡片 (Lovort 极简黑白灰风格，支持自动提取缩略图)
-                ZStack(alignment: .bottomTrailing) {
+                // 16:9 封面卡片 (Lovort 极简黑白灰风格，支持自动提取缩略图与历史进度指示)
+                ZStack(alignment: .bottom) {
                     Group {
                         if let thumbnail = thumbnail {
                             thumbnail
@@ -47,17 +52,40 @@ public struct VideoCardView: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 16))
 
-                    // 时长 Tag
-                    HStack(spacing: 4) {
-                        Text(formatDuration(video.duration))
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.white)
+                    // 底部进度条与标签覆盖层
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            // 时长 Tag
+                            HStack(spacing: 4) {
+                                Text(formatDuration(video.duration))
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.white)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.75))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .padding(10)
+                        }
+
+                        // 历史进度条指示器
+                        if progressRatio > 0 {
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Rectangle()
+                                        .fill(Color.white.opacity(0.2))
+                                        .frame(height: 3)
+
+                                    Rectangle()
+                                        .fill(Color.cyan)
+                                        .frame(width: geo.size.width * progressRatio, height: 3)
+                                }
+                            }
+                            .frame(height: 3)
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
+                        }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.75))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .padding(10)
                 }
 
                 // 标题与信息元数据
@@ -75,9 +103,15 @@ public struct VideoCardView: View {
                         Text("•")
                             .foregroundColor(.white.opacity(0.3))
 
-                        Text(video.isHidden ? "私密保险" : "AI 字幕就绪")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .cyan.opacity(0.9))
+                        if video.lastPlayedPosition > 0 {
+                            Text("上次看到 \(formatDuration(video.lastPlayedPosition))")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.cyan.opacity(0.9))
+                        } else {
+                            Text(video.isHidden ? "私密保险" : "AI 字幕就绪")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .white.opacity(0.4))
+                        }
                     }
                 }
                 .padding(.horizontal, 4)
@@ -116,7 +150,8 @@ public struct VideoCardView: View {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 480, height: 270)
-        let time = CMTime(seconds: min(1.0, max(0, video.duration / 2)), preferredTimescale: 600)
+        let targetSec = video.lastPlayedPosition > 1 ? video.lastPlayedPosition : min(1.0, max(0, video.duration / 2))
+        let time = CMTime(seconds: targetSec, preferredTimescale: 600)
         if let cgImage = try? await generator.image(at: time).image {
             #if os(iOS)
             self.thumbnail = Image(uiImage: UIImage(cgImage: cgImage))
