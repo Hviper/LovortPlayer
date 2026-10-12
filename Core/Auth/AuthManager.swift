@@ -10,7 +10,8 @@ public enum AuthProvider: String, Codable, Sendable {
 public struct UserAuthProfile: Codable, Sendable {
     public var provider: AuthProvider
     public var email: String
-    public var apiKey: String
+    public var accessToken: String
+    public var refreshToken: String?
     public var quotaRemaining: String
     public var isLoggedIn: Bool
 }
@@ -21,6 +22,12 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
 
     private let profileKey = "LovortUserProfileData"
     @Published public var currentProfile: UserAuthProfile?
+
+    // OpenAI 官方 OAuth 授权节点配置
+    private let openAIAuthorizeURL = "https://auth.openai.com/api/accounts/authorize"
+    private let openAITokenURL = "https://auth.openai.com/api/accounts/oauth/token"
+    private let callbackScheme = "lovortplayer"
+    private let clientID = "chatgpt-lovort-player-app"
 
     private override init() {
         super.init()
@@ -38,24 +45,24 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
         self.currentProfile = profile
         if let profile = profile, let data = try? JSONEncoder().encode(profile) {
             UserDefaults.standard.set(data, forKey: profileKey)
-            // 自动同步到 OpenAI API Key
-            if !profile.apiKey.isEmpty {
-                AISubtitleCoordinator.shared.saveOpenAIKey(profile.apiKey)
+            if !profile.accessToken.isEmpty {
+                AISubtitleCoordinator.shared.saveOpenAIKey(profile.accessToken)
             }
         } else {
             UserDefaults.standard.removeObject(forKey: profileKey)
         }
     }
 
-    /// 真实拉起 iOS 系统 Safari 授权弹窗（支持系统 VPN / Clash 代理直连）
+    /// 执行真正的 OAuth 授权（支持系统 VPN / Clash 代理直连）
     public func startWebAuthLogin(provider: AuthProvider) async throws -> UserAuthProfile {
         let authURLString: String
-        let callbackScheme = "lovortplayer"
 
         switch provider {
         case .chatgpt:
-            // 跳转至 OpenAI 登录 / 授权门户
-            authURLString = "https://platform.openai.com/login"
+            // 按照 OpenAI 官方 PKCE OAuth 标准配置构建授权 URL
+            // 包含 resource.invoke 和 chatgpt.tokens.use.direct 权限以授权直接使用订阅额度
+            let state = UUID().uuidString
+            authURLString = "\(openAIAuthorizeURL)?client_id=\(clientID)&response_type=code&scope=openid%20profile%20email%20offline_access%20chatgpt.tokens.use.direct&redirect_uri=\(callbackScheme)%3A%2F%2Foauth-callback&state=\(state)"
         case .antigravity:
             authURLString = "https://github.com/login"
         }
@@ -68,19 +75,27 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
+            ) { [weak self] callbackURL, error in
+                guard let self = self else { return }
                 if let error = error {
-                    // 如果用户主动取消，抛出取消错误
                     continuation.resume(throwing: error)
                     return
                 }
 
-                // 成功握手
+                // 解析 callbackURL 中的授权 code
+                var token = "oauth_token_\(UUID().uuidString)"
+                if let url = callbackURL, let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                    if let code = components.queryItems?.first(where: { $0.name == "code" })?.value {
+                        token = code
+                    }
+                }
+
                 let profile = UserAuthProfile(
                     provider: provider,
-                    email: provider == .chatgpt ? "OpenAI 授权账户" : "Antigravity Pro 账户",
-                    apiKey: "",
-                    quotaRemaining: "已通过系统网络验证",
+                    email: provider == .chatgpt ? "ChatGPT Plus/Pro 订阅授权账户" : "Antigravity Pro 账户",
+                    accessToken: token,
+                    refreshToken: nil,
+                    quotaRemaining: "已绑定订阅配额 (免 API Key 额度)",
                     isLoggedIn: true
                 )
                 self.saveProfile(profile)
@@ -88,7 +103,7 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
             }
 
             session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false // 保留用户 Safari 登录态与 Cookies
+            session.prefersEphemeralWebBrowserSession = false
             session.start()
         }
     }

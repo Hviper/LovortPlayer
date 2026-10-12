@@ -15,6 +15,8 @@ public struct FullscreenVideoPlayerView: View {
     @State private var panStartTime: TimeInterval = 0
     @State private var panTargetTime: TimeInterval = 0
     @State private var isLandscape: Bool = false
+    @State private var hideHUDTask: Task<Void, Never>? = nil
+    @State private var initialVolume: Float = 0.5
 
     public init(videoURL: URL, videoTitle: String, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
@@ -35,10 +37,10 @@ public struct FullscreenVideoPlayerView: View {
                     let screenWidth = UIScreen.main.bounds.width
                     if location.x < screenWidth / 2 {
                         viewModel.rewind(by: 10)
-                        showGestureHUD(icon: "gobackward.10", text: "-10s")
+                        showGestureHUD(icon: "gobackward.10", text: "-10s", autoDismiss: true)
                     } else {
                         viewModel.fastForward(by: 10)
-                        showGestureHUD(icon: "goforward.10", text: "+10s")
+                        showGestureHUD(icon: "goforward.10", text: "+10s", autoDismiss: true)
                     }
                     #else
                     viewModel.fastForward(by: 10)
@@ -309,19 +311,23 @@ public struct FullscreenVideoPlayerView: View {
             panTargetTime = target
             showGestureHUD(
                 icon: delta >= 0 ? "forward.fill" : "backward.fill",
-                text: "\(formatTime(target)) (\(delta >= 0 ? "+" : "")\(Int(delta))s)"
+                text: "\(formatTime(target)) (\(delta >= 0 ? "+" : "")\(Int(delta))s)",
+                autoDismiss: false
             )
         } else {
-            // 垂直滑动：左半屏调系统亮度，右半屏调系统音量
+            // 垂直滑动：左半屏调系统亮度，右半屏调系统真实音量
             if value.startLocation.x < screenWidth / 2 {
                 let current = UIScreen.main.brightness
                 let newBrightness = max(0.0, min(1.0, current - translation.height / 5000.0))
                 UIScreen.main.brightness = newBrightness
-                showGestureHUD(icon: "sun.max.fill", text: "\(Int(newBrightness * 100))%")
+                showGestureHUD(icon: "sun.max.fill", text: "\(Int(newBrightness * 100))%", autoDismiss: false)
             } else {
-                let change = -translation.height / 300.0
-                let vol = max(0, min(100, Int((0.5 + change) * 100)))
-                showGestureHUD(icon: "speaker.wave.3.fill", text: "\(vol)%")
+                // 右半屏调系统硬件音量
+                let currentVol = SystemVolumeController.shared.getCurrentVolume()
+                let delta = Float(-translation.height / 8000.0)
+                let newVol = max(0.0, min(1.0, currentVol + delta))
+                SystemVolumeController.shared.setVolume(newVol)
+                showGestureHUD(icon: "speaker.wave.3.fill", text: "\(Int(newVol * 100))%", autoDismiss: false)
             }
         }
     }
@@ -332,16 +338,30 @@ public struct FullscreenVideoPlayerView: View {
             panStartTime = 0
             panTargetTime = 0
         }
-        withAnimation {
-            gestureIndicatorText = nil
-            gestureIndicatorIcon = nil
-        }
+        autoDismissHUD(after: 0.8)
     }
     #endif
 
-    private func showGestureHUD(icon: String, text: String) {
+    private func showGestureHUD(icon: String, text: String, autoDismiss: Bool) {
+        hideHUDTask?.cancel()
         self.gestureIndicatorIcon = icon
         self.gestureIndicatorText = text
+        if autoDismiss {
+            autoDismissHUD(after: 1.0)
+        }
+    }
+
+    private func autoDismissHUD(after seconds: Double) {
+        hideHUDTask?.cancel()
+        hideHUDTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !Task.isCancelled {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    self.gestureIndicatorText = nil
+                    self.gestureIndicatorIcon = nil
+                }
+            }
+        }
     }
 
     private func formatTime(_ seconds: TimeInterval) -> String {
