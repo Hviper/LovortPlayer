@@ -1,14 +1,36 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+import PhotosUI
+#endif
 
 public struct MediaLibraryHomeView: View {
-    @State private var videos: [VideoItem] = []
+    @StateObject private var libraryManager = MediaLibraryManager.shared
     @State private var selectedVideo: VideoItem?
     @State private var showLANUpload: Bool = false
     @State private var showVaultUnlocked: Bool = false
     @State private var isAuthenticatingVault: Bool = false
-    @State private var filterTab: Int = 0
+    @State private var filterTab: Int = 0 // 0: 全部, 1: 精彩剪辑, 2: 隐私保险箱
+    @State private var isFileImporterPresented: Bool = false
+    #if os(iOS)
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    #endif
 
     public init() {}
+
+    private var filteredVideos: [VideoItem] {
+        switch filterTab {
+        case 1:
+            // 精彩剪辑
+            return libraryManager.videos.filter { $0.fileURL.path.contains("/Clips/") }
+        case 2:
+            // 隐私保险箱
+            return libraryManager.videos.filter { $0.isHidden }
+        default:
+            // 全部（未解锁时不展示隐私视频）
+            return libraryManager.videos.filter { showVaultUnlocked ? true : !$0.isHidden }
+        }
+    }
 
     public var body: some View {
         NavigationStack {
@@ -23,24 +45,47 @@ public struct MediaLibraryHomeView: View {
                     tabsBar
 
                     // 视频卡片流
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
-                            ForEach(videos.filter { showVaultUnlocked ? true : !$0.isHidden }) { video in
-                                VideoCardView(video: video) {
-                                    selectedVideo = video
+                    if libraryManager.isLoading && libraryManager.videos.isEmpty {
+                        Spacer()
+                        ProgressView()
+                            .tint(.white)
+                        Spacer()
+                    } else if filteredVideos.isEmpty {
+                        emptyStateView
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
+                                ForEach(filteredVideos) { video in
+                                    VideoCardView(
+                                        video: video,
+                                        onSelect: {
+                                            selectedVideo = video
+                                        },
+                                        onToggleHide: {
+                                            Task {
+                                                try? await libraryManager.toggleHideVideo(video)
+                                            }
+                                        },
+                                        onDelete: {
+                                            libraryManager.deleteVideo(video)
+                                        }
+                                    )
                                 }
                             }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 16)
+                            .padding(.bottom, 40)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 16)
-                        .padding(.bottom, 32)
+                        .refreshable {
+                            libraryManager.reloadLibrary()
+                        }
                     }
                 }
             }
             #if os(iOS)
             .navigationBarHidden(true)
             #endif
-            .sheet(item: $selectedVideo) { video in
+            .fullScreenCover(item: $selectedVideo) { video in
                 FullscreenVideoPlayerView(
                     videoURL: video.fileURL,
                     videoTitle: video.title,
@@ -52,28 +97,76 @@ public struct MediaLibraryHomeView: View {
             .sheet(isPresented: $showLANUpload) {
                 LANUploadSheet()
             }
-        }
-        .onAppear {
-            loadMockVideos()
+            .fileImporter(
+                isPresented: $isFileImporterPresented,
+                allowedContentTypes: [.movie, .video],
+                allowsMultipleSelection: true
+            ) { result in
+                if case .success(let urls) = result {
+                    Task {
+                        for url in urls {
+                            try? await libraryManager.importFile(from: url, isHidden: filterTab == 2)
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // MARK: - 顶栏 (包含局域网快传入口 & 下拉/长按解锁 Face ID 保险箱)
+    // MARK: - 顶栏
     private var customHeaderBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(showVaultUnlocked ? "私密保险箱" : "媒体库")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(showVaultUnlocked ? .cyan : .white)
-                Text(showVaultUnlocked ? "已解除 AES-GCM 保护" : "全部视频 (\(videos.count))")
+                HStack(spacing: 6) {
+                    Text(filterTab == 2 ? "私密保险箱" : "媒体库")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundColor(filterTab == 2 || showVaultUnlocked ? .cyan : .white)
+
+                    if showVaultUnlocked {
+                        Image(systemName: "lock.open.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.cyan)
+                    }
+                }
+                Text(showVaultUnlocked ? "私密空间已解锁 (\(filteredVideos.count))" : "本地视频 (\(filteredVideos.count))")
                     .font(.system(size: 12))
                     .foregroundColor(.white.opacity(0.5))
             }
-            .onLongPressGesture(minimumDuration: 1.2) {
-                triggerVaultBiometrics()
-            }
 
             Spacer()
+
+            // 导入视频按钮
+            Menu {
+                #if os(iOS)
+                PhotosPicker(
+                    selection: $selectedPhotoItems,
+                    matching: .videos
+                ) {
+                    Label("从相册导入", systemImage: "photo.on.rectangle")
+                }
+                #endif
+                Button(action: { isFileImporterPresented = true }) {
+                    Label("从文件导入", systemImage: "folder")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.1)))
+            }
+            #if os(iOS)
+            .onChange(of: selectedPhotoItems) { newItems in
+                Task {
+                    for item in newItems {
+                        if let movie = try? await item.loadTransferable(type: VideoTransferable.self) {
+                            try? await libraryManager.importFile(from: movie.url, isHidden: filterTab == 2)
+                        }
+                    }
+                    selectedPhotoItems.removeAll()
+                }
+            }
+            #endif
 
             // 局域网传输按钮
             Button(action: { showLANUpload = true }) {
@@ -88,7 +181,7 @@ public struct MediaLibraryHomeView: View {
                 .padding(.vertical, 8)
                 .background(
                     Capsule()
-                        .fill(Color.white.opacity(0.08))
+                        .fill(Color.white.opacity(0.1))
                 )
             }
         }
@@ -97,11 +190,12 @@ public struct MediaLibraryHomeView: View {
         .padding(.bottom, 8)
     }
 
+    // MARK: - 分类 Tabs
     private var tabsBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             tabButton(title: "全部", index: 0)
             tabButton(title: "精彩剪辑", index: 1)
-            tabButton(title: "最近播放", index: 2)
+            tabButton(title: "私密保险箱 🔒", index: 2)
             Spacer()
         }
         .padding(.horizontal, 20)
@@ -109,16 +203,45 @@ public struct MediaLibraryHomeView: View {
     }
 
     private func tabButton(title: String, index: Int) -> some View {
-        Button(action: { filterTab = index }) {
+        Button(action: {
+            if index == 2 && !showVaultUnlocked {
+                // 点击私密保险箱时触发 Face ID 验证
+                triggerVaultBiometrics()
+            } else {
+                withAnimation {
+                    filterTab = index
+                }
+            }
+        }) {
             Text(title)
                 .font(.system(size: 13, weight: filterTab == index ? .bold : .medium))
-                .foregroundColor(filterTab == index ? .black : .white.opacity(0.6))
+                .foregroundColor(filterTab == index ? .black : .white.opacity(0.65))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(
                     Capsule()
                         .fill(filterTab == index ? Color.white : Color.white.opacity(0.06))
                 )
+        }
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: filterTab == 2 ? "lock.shield" : "film")
+                .font(.system(size: 48))
+                .foregroundColor(.white.opacity(0.2))
+
+            Text(filterTab == 2 ? "保险箱为空" : "暂无视频文件")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white.opacity(0.7))
+
+            Text(filterTab == 2 ? "长按列表视频可将视频移入保险箱" : "可以通过右上角 [+] 导入视频，或点击 [无线传片] 电脑免线快传")
+                .font(.system(size: 13))
+                .foregroundColor(.white.opacity(0.4))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+            Spacer()
         }
     }
 
@@ -129,37 +252,27 @@ public struct MediaLibraryHomeView: View {
             isAuthenticatingVault = false
             if result.success {
                 withAnimation {
-                    showVaultUnlocked.toggle()
+                    showVaultUnlocked = true
+                    filterTab = 2
                 }
             }
         }
     }
+}
 
-    private func loadMockVideos() {
-        if videos.isEmpty {
-            videos = [
-                VideoItem(
-                    title: "Suzume.no.Tojimari.2022.mkv",
-                    fileURL: URL(fileURLWithPath: "/tmp/sample1.mp4"),
-                    duration: 7260,
-                    fileSize: 2_450_000_000,
-                    isHidden: false
-                ),
-                VideoItem(
-                    title: "Keynote.Clip.2026.mov",
-                    fileURL: URL(fileURLWithPath: "/tmp/sample2.mp4"),
-                    duration: 420,
-                    fileSize: 180_000_000,
-                    isHidden: false
-                ),
-                VideoItem(
-                    title: "Private_Vault_Record.mov",
-                    fileURL: URL(fileURLWithPath: "/tmp/vault.mov"),
-                    duration: 350,
-                    fileSize: 120_000_000,
-                    isHidden: true
-                )
-            ]
+#if os(iOS)
+struct VideoTransferable: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(received.file.lastPathComponent)
+            try? FileManager.default.removeItem(at: copy)
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return VideoTransferable(url: copy)
         }
     }
 }
+#endif

@@ -1,35 +1,53 @@
 import SwiftUI
+import AVFoundation
 
 public struct VideoCardView: View {
     public let video: VideoItem
     public var onSelect: () -> Void
+    public var onToggleHide: (() -> Void)? = nil
+    public var onDelete: (() -> Void)? = nil
 
-    public init(video: VideoItem, onSelect: @escaping () -> Void) {
+    @State private var thumbnail: Image? = nil
+
+    public init(
+        video: VideoItem,
+        onSelect: @escaping () -> Void,
+        onToggleHide: (() -> Void)? = nil,
+        onDelete: (() -> Void)? = nil
+    ) {
         self.video = video
         self.onSelect = onSelect
+        self.onToggleHide = onToggleHide
+        self.onDelete = onDelete
     }
 
     public var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 10) {
-                // 16:9 封面卡片 (Lovort 极简黑白灰风格)
+                // 16:9 封面卡片 (Lovort 极简黑白灰风格，支持自动提取缩略图)
                 ZStack(alignment: .bottomTrailing) {
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(
+                    Group {
+                        if let thumbnail = thumbnail {
+                            thumbnail
+                                .resizable()
+                                .aspectRatio(16/9, contentMode: .fill)
+                        } else {
                             LinearGradient(
                                 colors: [Color.white.opacity(0.08), Color.white.opacity(0.02)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
-                        )
-                        .aspectRatio(16/9, contentMode: .fit)
-                        .overlay(
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 26))
-                                .foregroundColor(.white.opacity(0.4))
-                        )
+                            .aspectRatio(16/9, contentMode: .fit)
+                            .overlay(
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 26))
+                                    .foregroundColor(.white.opacity(0.35))
+                            )
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
 
-                    // 时长与分辨率 Tag
+                    // 时长 Tag
                     HStack(spacing: 4) {
                         Text(formatDuration(video.duration))
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -37,7 +55,7 @@ public struct VideoCardView: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.65))
+                    .background(Color.black.opacity(0.75))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .padding(10)
                 }
@@ -57,33 +75,69 @@ public struct VideoCardView: View {
                         Text("•")
                             .foregroundColor(.white.opacity(0.3))
 
-                        Text("AI 字幕就绪")
+                        Text(video.isHidden ? "私密保险" : "AI 字幕就绪")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.cyan.opacity(0.9))
+                            .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .cyan.opacity(0.9))
                     }
                 }
                 .padding(.horizontal, 4)
             }
-            .padding(8)
+            .padding(10)
             .background(
                 RoundedRectangle(cornerRadius: 20)
-                    .fill(Color.white.opacity(0.03))
+                    .fill(Color.white.opacity(0.04))
                     .overlay(
                         RoundedRectangle(cornerRadius: 20)
-                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.07), lineWidth: 1)
                     )
             )
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if let onToggleHide = onToggleHide {
+                Button(action: onToggleHide) {
+                    Label(video.isHidden ? "移出保险箱" : "移入保险箱", systemImage: video.isHidden ? "lock.open" : "lock.fill")
+                }
+            }
+            if let onDelete = onDelete {
+                Button(role: .destructive, action: onDelete) {
+                    Label("删除视频", systemImage: "trash")
+                }
+            }
+        }
+        .task {
+            await generateThumbnail()
+        }
+    }
+
+    private func generateThumbnail() async {
+        guard thumbnail == nil else { return }
+        let asset = AVURLAsset(url: video.fileURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 480, height: 270)
+        let time = CMTime(seconds: min(1.0, max(0, video.duration / 2)), preferredTimescale: 600)
+        if let cgImage = try? await generator.image(at: time).image {
+            #if os(iOS)
+            self.thumbnail = Image(uiImage: UIImage(cgImage: cgImage))
+            #elseif os(macOS)
+            let rep = NSBitmapImageRep(cgImage: cgImage)
+            let nsImage = NSImage(size: NSSize(width: cgImage.width, height: cgImage.height))
+            nsImage.addRepresentation(rep)
+            self.thumbnail = Image(nsImage: nsImage)
+            #endif
+        }
     }
 
     private func formatDuration(_ duration: TimeInterval) -> String {
+        guard duration > 0 else { return "00:00" }
         let mins = Int(duration) / 60
         let secs = Int(duration) % 60
         return String(format: "%02d:%02d", mins, secs)
     }
 
     private func formatFileSize(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "未知大小" }
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file

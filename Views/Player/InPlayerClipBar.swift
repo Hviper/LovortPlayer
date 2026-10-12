@@ -28,16 +28,55 @@ public struct InPlayerClipBar: View {
 
                 Spacer()
 
+                if viewModel.isExportingClip {
+                    ProgressView()
+                        .tint(.cyan)
+                        .scaleEffect(0.8)
+                } else {
+                    Button(action: {
+                        viewModel.exportClip()
+                    }) {
+                        Text("完成导出")
+                            .font(.system(size: 13, weight: .bold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.cyan)
+                            .foregroundColor(.black)
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+
+            // 快捷标记当前时间为起点/终点
+            HStack(spacing: 12) {
                 Button(action: {
-                    onExport(viewModel.clipStartTime, viewModel.clipEndTime)
+                    viewModel.clipStartTime = viewModel.currentTime
+                    if viewModel.clipEndTime <= viewModel.clipStartTime {
+                        viewModel.clipEndTime = min(viewModel.duration, viewModel.clipStartTime + 5)
+                    }
                 }) {
-                    Text("完成导出")
-                        .font(.system(size: 13, weight: .bold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.cyan)
-                        .foregroundColor(.black)
-                        .clipShape(Capsule())
+                    Text("设当前为 In 点")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.white.opacity(0.12)))
+                }
+
+                Spacer()
+
+                Button(action: {
+                    viewModel.clipEndTime = viewModel.currentTime
+                    if viewModel.clipStartTime >= viewModel.clipEndTime {
+                        viewModel.clipStartTime = max(0, viewModel.clipEndTime - 5)
+                    }
+                }) {
+                    Text("设当前为 Out 点")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.white.opacity(0.12)))
                 }
             }
 
@@ -54,9 +93,14 @@ public struct InPlayerClipBar: View {
 
                 Spacer()
 
-                Text("时长: \(formatTime(max(0, viewModel.clipEndTime - viewModel.clipStartTime)))")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.cyan)
+                VStack(spacing: 2) {
+                    Text("剪辑时长")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.4))
+                    Text(formatTime(max(0, viewModel.clipEndTime - viewModel.clipStartTime)))
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.cyan)
+                }
 
                 Spacer()
 
@@ -70,6 +114,13 @@ public struct InPlayerClipBar: View {
                 }
             }
             .padding(.horizontal, 8)
+
+            if let msg = viewModel.exportMessage {
+                Text(msg)
+                    .font(.system(size: 12))
+                    .foregroundColor(.cyan)
+                    .transition(.opacity)
+            }
         }
         .padding(16)
         .background(

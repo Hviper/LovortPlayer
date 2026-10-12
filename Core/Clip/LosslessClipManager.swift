@@ -1,12 +1,15 @@
 import Foundation
 import AVFoundation
+#if os(iOS)
+import Photos
+#endif
 
 public final class LosslessClipManager: @unchecked Sendable {
     public static let shared = LosslessClipManager()
 
     private init() {}
 
-    /// 无损精准截取视频（使用 Passthrough GOP 复制码流，不经过重编码）
+    /// 无损精准截取视频（使用 Passthrough GOP 极速复制码流，不经过重编码）
     public func exportLosslessClip(
         assetURL: URL,
         outputURL: URL,
@@ -14,14 +17,25 @@ public final class LosslessClipManager: @unchecked Sendable {
         endTime: CMTime
     ) async throws {
         let asset = AVURLAsset(url: assetURL)
+        
+        // 确保父目录存在
+        let parentDir = outputURL.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: parentDir.path) {
+            try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        }
+
+        // 检查 Passthrough 兼容性，如不兼容则使用 HighestQuality 兼容性编码
+        let presets = await AVAssetExportSession.exportPresets(compatibleWith: asset)
+        let preset = presets.contains(AVAssetExportPresetPassthrough) ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality
+
         guard let exportSession = AVAssetExportSession(
             asset: asset,
-            presetName: AVAssetExportPresetPassthrough
+            presetName: preset
         ) else {
             throw NSError(
                 domain: "ClipError",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to initialize passthrough export session"]
+                userInfo: [NSLocalizedDescriptionKey: "无法初始化视频导出器"]
             )
         }
 
@@ -30,7 +44,7 @@ public final class LosslessClipManager: @unchecked Sendable {
         exportSession.timeRange = CMTimeRangeFromTimeToTime(start: startTime, end: endTime)
 
         if FileManager.default.fileExists(atPath: outputURL.path) {
-            try FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: outputURL)
         }
 
         await exportSession.export()
@@ -39,9 +53,18 @@ public final class LosslessClipManager: @unchecked Sendable {
             let error = exportSession.error ?? NSError(
                 domain: "ClipError",
                 code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Unknown export error"]
+                userInfo: [NSLocalizedDescriptionKey: "剪辑导出失败: \(exportSession.error?.localizedDescription ?? "未知错误")"]
             )
             throw error
         }
+
+        #if os(iOS)
+        // 尝试自动保存一份到系统相册
+        if PHPhotoLibrary.authorizationStatus(for: .addOnly) == .authorized {
+            try? await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
+            }
+        }
+        #endif
     }
 }

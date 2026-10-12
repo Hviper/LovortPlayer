@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 public struct FullscreenVideoPlayerView: View {
     @StateObject public var viewModel = PlayerViewModel()
@@ -7,9 +10,11 @@ public struct FullscreenVideoPlayerView: View {
     public var onDismiss: () -> Void
 
     // 局部手势状态
-    @State private var dragOffset: CGSize = .zero
     @State private var gestureIndicatorText: String?
     @State private var gestureIndicatorIcon: String?
+    @State private var panStartTime: TimeInterval = 0
+    @State private var panTargetTime: TimeInterval = 0
+    @State private var initialBrightness: CGFloat = 0.5
 
     public init(videoURL: URL, videoTitle: String, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
@@ -19,7 +24,7 @@ public struct FullscreenVideoPlayerView: View {
 
     public var body: some View {
         ZStack {
-            // 背景黑底
+            // 背景黑底，忽略全屏安全区
             Color.black.ignoresSafeArea()
 
             // 原生 AVPlayer 视频渲染层
@@ -50,9 +55,8 @@ public struct FullscreenVideoPlayerView: View {
                         .onChanged { value in
                             handlePanGesture(value)
                         }
-                        .onEnded { _ in
-                            gestureIndicatorText = nil
-                            gestureIndicatorIcon = nil
+                        .onEnded { value in
+                            handlePanEnded(value)
                         }
                 )
                 #endif
@@ -88,9 +92,8 @@ public struct FullscreenVideoPlayerView: View {
 
                     // 剪辑模式工具条 或 正常底部控制条
                     if viewModel.isClipMode {
-                        InPlayerClipBar(viewModel: viewModel) { start, end in
-                            // 触发剪辑导出任务
-                            withAnimation { viewModel.isClipMode = false }
+                        InPlayerClipBar(viewModel: viewModel) { _, _ in
+                            viewModel.exportClip()
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     } else {
@@ -128,7 +131,7 @@ public struct FullscreenVideoPlayerView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 38, height: 38)
-                    .background(Circle().fill(Color.white.opacity(0.12)))
+                    .background(Circle().fill(Color.white.opacity(0.15)))
             }
 
             Text(videoTitle)
@@ -152,7 +155,7 @@ public struct FullscreenVideoPlayerView: View {
                     .font(.system(size: 15))
                     .foregroundColor(viewModel.isClipMode ? .cyan : .white)
                     .frame(width: 38, height: 38)
-                    .background(Circle().fill(Color.white.opacity(0.12)))
+                    .background(Circle().fill(Color.white.opacity(0.15)))
             }
 
             // AI 字幕按钮
@@ -168,7 +171,7 @@ public struct FullscreenVideoPlayerView: View {
                 .foregroundColor(viewModel.isAISubtitleEnabled ? .cyan : .white)
                 .padding(.horizontal, 10)
                 .frame(height: 38)
-                .background(Capsule().fill(Color.white.opacity(0.12)))
+                .background(Capsule().fill(Color.white.opacity(0.15)))
             }
         }
         .padding(.horizontal, 16)
@@ -201,7 +204,7 @@ public struct FullscreenVideoPlayerView: View {
             }
 
             // 播放与快进操作按键
-            HStack(spacing: 32) {
+            HStack(spacing: 36) {
                 Button(action: { viewModel.rewind(by: 10) }) {
                     Image(systemName: "gobackward.10")
                         .font(.system(size: 20))
@@ -213,7 +216,7 @@ public struct FullscreenVideoPlayerView: View {
                         .font(.system(size: 26))
                         .foregroundColor(.white)
                         .frame(width: 54, height: 54)
-                        .background(Circle().fill(Color.white.opacity(0.15)))
+                        .background(Circle().fill(Color.white.opacity(0.18)))
                 }
 
                 Button(action: { viewModel.fastForward(by: 10) }) {
@@ -235,7 +238,7 @@ public struct FullscreenVideoPlayerView: View {
                 )
         )
         .padding(.horizontal, 16)
-        .padding(.bottom, 24)
+        .padding(.bottom, 32)
     }
 
     #if os(iOS)
@@ -244,22 +247,41 @@ public struct FullscreenVideoPlayerView: View {
         let translation = value.translation
 
         if abs(translation.width) > abs(translation.height) {
-            // 水平滑动：微调进度
-            let delta = TimeInterval(translation.width / 5.0)
-            let targetTime = max(0, min(viewModel.duration, viewModel.currentTime + delta))
+            // 水平滑动：快进快退 seek
+            if panStartTime == 0 {
+                panStartTime = viewModel.currentTime
+            }
+            let delta = TimeInterval(translation.width / 4.0)
+            let target = max(0, min(viewModel.duration, panStartTime + delta))
+            panTargetTime = target
             showGestureHUD(
                 icon: delta >= 0 ? "forward.fill" : "backward.fill",
-                text: formatTime(targetTime)
+                text: "\(formatTime(target)) (\(delta >= 0 ? "+" : "")\(Int(delta))s)"
             )
         } else {
-            // 垂直滑动：左半屏亮度，右半屏音量
+            // 垂直滑动：左半屏调系统亮度，右半屏调系统音量
             if value.startLocation.x < screenWidth / 2 {
-                let change = -translation.height / 300.0
-                showGestureHUD(icon: "sun.max.fill", text: "\(Int(max(0, min(1, change + 0.5)) * 100))%")
+                let current = UIScreen.main.brightness
+                let newBrightness = max(0.0, min(1.0, current - translation.height / 5000.0))
+                UIScreen.main.brightness = newBrightness
+                showGestureHUD(icon: "sun.max.fill", text: "\(Int(newBrightness * 100))%")
             } else {
                 let change = -translation.height / 300.0
-                showGestureHUD(icon: "speaker.wave.3.fill", text: "\(Int(max(0, min(1, change + 0.5)) * 100))%")
+                let vol = max(0, min(100, Int((0.5 + change) * 100)))
+                showGestureHUD(icon: "speaker.wave.3.fill", text: "\(vol)%")
             }
+        }
+    }
+
+    private func handlePanEnded(_ value: DragGesture.Value) {
+        if panTargetTime > 0 {
+            viewModel.seek(to: panTargetTime)
+            panStartTime = 0
+            panTargetTime = 0
+        }
+        withAnimation {
+            gestureIndicatorText = nil
+            gestureIndicatorIcon = nil
         }
     }
     #endif
