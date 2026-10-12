@@ -50,3 +50,15 @@ jobs:
           name: LovortPlayer-IPA
           path: LovortPlayer.ipa
           retention-days: 7
+
+      - name: Auto Publish to Releases
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        with:
+          tag_name: latest
+          name: "LovortPlayer Latest Build"
+          files: LovortPlayer.ipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
