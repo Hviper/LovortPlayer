@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lovort Player — iPhone Interactive Demo</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    /* 模拟 iPhone 外壳与柔和阴影 */
+    .iphone-frame {
+      width: 390px;
+      height: 844px;
+      border-radius: 54px;
+      box-shadow: 0 0 0 12px #1e1e24, 0 0 0 14px #2c2c34, 0 35px 80px rgba(0,0,0,0.7);
+      position: relative;
+      overflow: hidden;
+      background: #0A0A0C;
+    }
+    .island {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 120px;
+      height: 34px;
+      background: #000;
+      border-radius: 20px;
+      z-index: 999;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+    }
+    .glass {
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .tap-active:active {
+      transform: scale(0.97);
+    }
+    /* 自定义滑动条 */
+    input[type=range] {
+      -webkit-appearance: none;
+      background: rgba(255,255,255,0.15);
+      border-radius: 99px;
+      height: 4px;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #00F2FE;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-[#0f0f13] text-white flex items-center justify-center min-h-screen p-4 font-sans select-none">
+
+  <!-- iPhone 模拟器外壳 -->
+  <div class="iphone-frame flex flex-col relative text-white">
+    <!-- 灵动岛 -->
+    <div class="island">
+      <div class="w-3 h-3 rounded-full bg-[#111] border border-[#222]"></div>
+      <div class="w-3 h-3 rounded-full bg-[#08081a]"></div>
+    </div>
+
+    <!-- 顶部状态栏 -->
+    <div class="h-11 flex justify-between items-end px-7 pb-1 text-xs text-zinc-300 font-medium z-50">
+      <span>17:04</span>
+      <div class="flex items-center space-x-1.5">
+        <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24"><path d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L12 22l7.03-4.39C20.26 16.07 21 14.12 21 12c0-4.97-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg>
+        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M12 4C7.31 4 3.07 5.9 0 8.98L12 21 24 8.98C20.93 5.9 16.69 4 12 4z"/></svg>
+        <div class="w-5 h-2.5 border border-zinc-400 rounded-sm p-0.5 flex items-center">
+          <div class="w-full h-full bg-emerald-400 rounded-2xs"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 页面 1：媒体库主页 (默认可见) -->
+    <div id="view-library" class="flex-1 flex flex-col overflow-hidden relative">
+      <!-- 顶栏导航 -->
+      <div class="px-5 pt-3 pb-2 flex justify-between items-center">
+        <div>
+          <div id="lib-title" class="text-2xl font-bold flex items-center space-x-2 cursor-pointer transition-colors" title="长按 1.2 秒解锁 Face ID 保险箱">
+            <span>媒体库</span>
+            <span id="vault-badge" class="hidden text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full border border-cyan-500/30">AES-GCM 已解密</span>
+          </div>
+          <div class="text-xs text-zinc-500 mt-0.5">长按上方标题可进入隐私保险箱</div>
+        </div>
+        <button onclick="toggleLANModal(true)" class="glass px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center space-x-1.5 text-zinc-200 tap-active">
+          <svg class="w-3.5 h-3.5 fill-cyan-400" viewBox="0 0 24 24"><path d="M12 4C7.31 4 3.07 5.9 0 8.98L12 21 24 8.98C20.93 5.9 16.69 4 12 4z"/></svg>
+          <span>无线传片</span>
+        </button>
+      </div>
+
+      <!-- 分类 Tabs -->
+      <div class="flex px-5 space-x-2 py-2">
+        <button class="bg-white text-black text-xs font-semibold px-3.5 py-1.5 rounded-full">全部</button>
+        <button class="glass text-zinc-400 text-xs px-3.5 py-1.5 rounded-full">精彩剪辑</button>
+        <button class="glass text-zinc-400 text-xs px-3.5 py-1.5 rounded-full">最近播放</button>
+      </div>
+
+      <!-- 视频列表卡片流 -->
+      <div class="flex-1 overflow-y-auto px-5 py-3 space-y-4">
+        <!-- 卡片 1 (带 AI 字幕) -->
+        <div onclick="openPlayer('Suzume.no.Tojimari.2022.mkv', '02:01:00')" class="glass rounded-2xl p-2.5 cursor-pointer tap-active">
+          <div class="w-full h-44 rounded-xl bg-gradient-to-tr from-zinc-900 to-zinc-800 relative flex items-center justify-center overflow-hidden border border-white/5">
+            <div class="absolute inset-0 bg-cover bg-center opacity-60" style="background-image: url('https://images.unsplash.com/photo-1534447677768-be436bb09401?w=800&auto=format&fit=crop&q=60');"></div>
+            <div class="w-12 h-12 rounded-full glass flex items-center justify-center z-10">
+              <svg class="w-5 h-5 fill-white translate-x-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </div>
+            <span class="absolute bottom-2.5 right-2.5 bg-black/75 px-2 py-0.5 rounded text-[11px] font-mono">02:01:00</span>
+          </div>
+          <div class="mt-2.5 px-1">
+            <div class="text-sm font-semibold truncate">Suzume.no.Tojimari.2022.mkv</div>
+            <div class="text-xs text-zinc-400 mt-1 flex items-center space-x-2">
+              <span>2.45 GB</span>
+              <span>•</span>
+              <span class="text-cyan-400 font-medium">AI 双语字幕已就绪</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 卡片 2 (短片) -->
+        <div onclick="openPlayer('Apple.Event.Highlights.mov', '00:07:00')" class="glass rounded-2xl p-2.5 cursor-pointer tap-active">
+          <div class="w-full h-44 rounded-xl bg-gradient-to-tr from-zinc-900 to-zinc-800 relative flex items-center justify-center overflow-hidden border border-white/5">
+            <div class="absolute inset-0 bg-cover bg-center opacity-60" style="background-image: url('https://images.unsplash.com/photo-1518770660439-4636190af475?w=800&auto=format&fit=crop&q=60');"></div>
+            <div class="w-12 h-12 rounded-full glass flex items-center justify-center z-10">
+              <svg class="w-5 h-5 fill-white translate-x-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </div>
+            <span class="absolute bottom-2.5 right-2.5 bg-black/75 px-2 py-0.5 rounded text-[11px] font-mono">00:07:00</span>
+          </div>
+          <div class="mt-2.5 px-1">
+            <div class="text-sm font-semibold truncate">Apple.Event.Highlights.mov</div>
+            <div class="text-xs text-zinc-400 mt-1 flex items-center space-x-2">
+              <span>180 MB</span>
+              <span>•</span>
+              <span class="text-zinc-500">剪辑片段</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 隐私视频 (解密后显示) -->
+        <div id="secret-card" class="hidden glass rounded-2xl p-2.5 border border-cyan-500/30">
+          <div class="w-full h-44 rounded-xl bg-zinc-900 relative flex items-center justify-center overflow-hidden">
+            <span class="text-cyan-400 text-xs font-semibold">🔒 隐藏保险箱私人视频</span>
+          </div>
+          <div class="mt-2.5 px-1">
+            <div class="text-sm font-semibold text-cyan-300">Private_Security_GOP.mov</div>
+            <div class="text-xs text-zinc-400 mt-1">120 MB · AES-256 加密保护</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 页面 2：全屏播放器视图 (覆盖层) -->
+    <div id="view-player" class="hidden absolute inset-0 bg-black flex flex-col z-50">
+      <!-- 视频画面模拟 -->
+      <div id="video-canvas" class="relative flex-1 flex items-center justify-center overflow-hidden" onclick="togglePlayerControls()">
+        <img src="https://images.unsplash.com/photo-1534447677768-be436bb09401?w=800&auto=format&fit=crop&q=60" class="absolute inset-0 w-full h-full object-cover opacity-80" alt="Video frame">
+        
+        <!-- 手势双击快进 HUD -->
+        <div id="gesture-hud" class="hidden absolute z-30 glass px-6 py-4 rounded-2xl flex flex-col items-center">
+          <span id="gesture-hud-icon" class="text-2xl">⏩</span>
+          <span id="gesture-hud-text" class="text-xs font-mono font-bold mt-1 text-white">+10s</span>
+        </div>
+
+        <!-- AI 实时双语字幕浮层 (Lovort 质感) -->
+        <div id="subtitles-box" class="absolute bottom-20 z-20 px-6 text-center w-full">
+          <div class="inline-block glass px-4 py-2 rounded-xl text-center shadow-lg border border-white/10">
+            <div id="sub-trans" class="text-base font-bold text-white drop-shadow">开始下雨了呢... 我必须赶过去。</div>
+            <div id="sub-orig" class="text-xs text-zinc-300 drop-shadow mt-0.5">雨が降ってきたね... 行かなきゃ。</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 播放器悬浮控制层 -->
+      <div id="player-controls" class="absolute inset-0 flex flex-col justify-between p-5 pointer-events-none transition-opacity duration-300">
+        <!-- 顶栏 -->
+        <div class="flex justify-between items-center pointer-events-auto pt-7">
+          <button onclick="closePlayer()" class="w-9 h-9 rounded-full glass flex items-center justify-center tap-active">
+            <svg class="w-4 h-4 fill-white" viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+          </button>
+          <div id="playing-title" class="text-xs font-medium text-zinc-300 truncate max-w-[180px]">Suzume.no.Tojimari</div>
+          <div class="flex space-x-2">
+            <!-- 剪辑按钮 -->
+            <button onclick="toggleClipMode()" id="clip-btn" class="w-9 h-9 rounded-full glass flex items-center justify-center tap-active">
+              <svg class="w-4 h-4 fill-white" viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64z"/></svg>
+            </button>
+            <!-- AI 字幕按钮 -->
+            <button onclick="toggleAISheet(true)" class="px-2.5 h-9 rounded-full glass flex items-center space-x-1 text-cyan-400 font-bold text-xs tap-active">
+              <span>AI</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 剪辑工具条 (剪辑模式下替换底部控制器) -->
+        <div id="clip-bar" class="hidden pointer-events-auto glass rounded-2xl p-4 mb-4 border border-cyan-500/30">
+          <div class="flex justify-between items-center text-xs">
+            <button onclick="toggleClipMode()" class="text-zinc-400">取消</button>
+            <span class="font-semibold text-cyan-400">无损 GOP 极速剪辑</span>
+            <button onclick="exportClip()" class="bg-cyan-400 text-black px-3 py-1 rounded-full font-bold">导出片段</button>
+          </div>
+          <div class="flex justify-between text-xs mt-3 font-mono">
+            <div><span class="text-zinc-500">In:</span> 00:15.00</div>
+            <div class="text-cyan-400">区间: 00:30.00</div>
+            <div><span class="text-zinc-500">Out:</span> 00:45.00</div>
+          </div>
+        </div>
+
+        <!-- 正常底部控制台 -->
+        <div id="normal-controls" class="pointer-events-auto glass rounded-2xl p-4 mb-4 flex flex-col space-y-3">
+          <div class="flex items-center space-x-3 text-[11px] font-mono text-zinc-400">
+            <span id="curr-time">00:23</span>
+            <input type="range" min="0" max="100" value="23" class="flex-1" id="seek-bar" oninput="onSeek(this.value)">
+            <span id="dur-time">02:01</span>
+          </div>
+          <div class="flex justify-center items-center space-x-8">
+            <button onclick="fastSkip(-10)" class="tap-active text-zinc-300">
+              <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg>
+            </button>
+            <button onclick="togglePlay()" id="play-btn" class="w-12 h-12 rounded-full bg-white text-black flex items-center justify-center tap-active shadow-lg">
+              <svg class="w-5 h-5 fill-black translate-x-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button onclick="fastSkip(10)" class="tap-active text-zinc-300">
+              <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6-8.5-6z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 弹窗 1：无线直传抽屉 -->
+    <div id="modal-lan" class="hidden absolute inset-0 bg-black/80 backdrop-blur-md z-50 flex flex-col justify-end">
+      <div class="bg-[#121217] rounded-t-3xl p-6 border-t border-white/10 flex flex-col items-center text-center">
+        <div class="w-10 h-1 bg-zinc-600 rounded-full mb-6"></div>
+        <div class="w-16 h-16 rounded-full bg-cyan-500/10 flex items-center justify-center mb-4">
+          <svg class="w-8 h-8 fill-cyan-400" viewBox="0 0 24 24"><path d="M12 4C7.31 4 3.07 5.9 0 8.98L12 21 24 8.98C20.93 5.9 16.69 4 12 4z"/></svg>
+        </div>
+        <h3 class="text-lg font-bold">局域网高速免流直传</h3>
+        <p class="text-xs text-zinc-400 mt-1 max-w-[260px]">电脑浏览器打开同一 Wi-Fi 下的地址即可拖拽上传</p>
+        <div class="glass w-full rounded-2xl p-4 my-6 border border-cyan-500/30">
+          <div class="text-[11px] text-zinc-500">电脑访问地址</div>
+          <div class="text-cyan-400 font-mono font-bold text-lg mt-1">http://192.168.1.108:8080</div>
+        </div>
+        <button onclick="toggleLANModal(false)" class="w-full bg-white text-black py-3 rounded-full font-semibold text-sm tap-active">关闭</button>
+      </div>
+    </div>
+
+    <!-- 弹窗 2：AI 字幕设置抽屉 -->
+    <div id="modal-ai" class="hidden absolute inset-0 bg-black/80 backdrop-blur-md z-50 flex flex-col justify-end">
+      <div class="bg-[#121217] rounded-t-3xl p-6 border-t border-white/10 flex flex-col">
+        <div class="w-10 h-1 bg-zinc-600 rounded-full self-center mb-4"></div>
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-base font-bold">AI 实时双语字幕引擎</h3>
+          <span class="text-xs text-cyan-400 font-medium">Antigravity OAuth</span>
+        </div>
+        <div class="space-y-3">
+          <div class="glass p-3 rounded-xl flex justify-between items-center text-xs">
+            <span>识别源语言</span>
+            <span class="text-cyan-400 font-semibold">自动识别 (日/英/韩)</span>
+          </div>
+          <div class="glass p-3 rounded-xl flex justify-between items-center text-xs">
+            <span>翻译目标</span>
+            <span class="text-cyan-400 font-semibold">中文 (简体)</span>
+          </div>
+          <div class="glass p-3 rounded-xl flex justify-between items-center text-xs">
+            <span>驱动核心</span>
+            <span class="text-zinc-300">WhisperKit (本地免流量)</span>
+          </div>
+        </div>
+        <button onclick="toggleAISheet(false)" class="mt-6 w-full bg-cyan-400 text-black py-3 rounded-full font-bold text-sm tap-active">应用并返回</button>
+      </div>
+    </div>
+
+    <!-- 底部 Home 虚拟横条 -->
+    <div class="h-5 flex items-center justify-center z-50">
+      <div class="w-32 h-1 bg-zinc-500/50 rounded-full"></div>
+    </div>
+  </div>
+
+  <script>
+    let isPlaying = false;
+    let isClipMode = false;
+    let controlsTimer = null;
+
+    // 标题长按触发 Face ID 保险箱
+    const libTitle = document.getElementById('lib-title');
+    let pressTimer = null;
+    libTitle.addEventListener('mousedown', () => {
+      pressTimer = setTimeout(triggerVault, 1000);
+    });
+    libTitle.addEventListener('mouseup', () => clearTimeout(pressTimer));
+
+    function triggerVault() {
+      const confirmed = confirm("【Face ID 模拟】\n正在使用面容识别解锁隐藏隐私保险箱...");
+      if (confirmed) {
+        document.getElementById('vault-badge').classList.remove('hidden');
+        document.getElementById('secret-card').classList.remove('hidden');
+        alert("Face ID 认证成功！已载入 AES-GCM 加密视频空间。");
+      }
+    }
+
+    function toggleLANModal(show) {
+      document.getElementById('modal-lan').classList.toggle('hidden', !show);
+    }
+
+    function toggleAISheet(show) {
+      document.getElementById('modal-ai').classList.toggle('hidden', !show);
+    }
+
+    function openPlayer(title, dur) {
+      document.getElementById('playing-title').innerText = title;
+      document.getElementById('dur-time').innerText = dur;
+      document.getElementById('view-player').classList.remove('hidden');
+      togglePlay(true);
+    }
+
+    function closePlayer() {
+      document.getElementById('view-player').classList.add('hidden');
+      togglePlay(false);
+    }
+
+    function togglePlay(force) {
+      isPlaying = force !== undefined ? force : !isPlaying;
+      const btn = document.getElementById('play-btn');
+      btn.innerHTML = isPlaying 
+        ? '<svg class="w-5 h-5 fill-black" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'
+        : '<svg class="w-5 h-5 fill-black translate-x-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+    }
+
+    function toggleClipMode() {
+      isClipMode = !isClipMode;
+      document.getElementById('clip-bar').classList.toggle('hidden', !isClipMode);
+      document.getElementById('normal-controls').classList.toggle('hidden', isClipMode);
+      document.getElementById('clip-btn').classList.toggle('text-cyan-400', isClipMode);
+    }
+
+    function exportClip() {
+      alert("✅ 已完成 GOP Passthrough 无损剪辑导出！\n文件已保存至本地相册/应用沙盒。");
+      toggleClipMode();
+    }
+
+    function fastSkip(sec) {
+      const hud = document.getElementById('gesture-hud');
+      document.getElementById('gesture-hud-icon').innerText = sec > 0 ? "⏩" : "⏪";
+      document.getElementById('gesture-hud-text').innerText = (sec > 0 ? "+" : "") + sec + "s";
+      hud.classList.remove('hidden');
+      setTimeout(() => hud.classList.add('hidden'), 700);
+    }
+
+    function onSeek(val) {
+      document.getElementById('curr-time').innerText = "00:" + (val < 10 ? "0" + val : val);
+    }
+
+    function togglePlayerControls() {
+      const controls = document.getElementById('player-controls');
+      controls.classList.toggle('opacity-0');
+      controls.classList.toggle('pointer-events-none');
+    }
+  </script>
+</body>
+</html>
