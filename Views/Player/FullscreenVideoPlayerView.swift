@@ -61,7 +61,7 @@ public struct FullscreenVideoPlayerView: View {
                 )
                 #endif
 
-            // AI 实时双语字幕图层
+            // AI 实时双语字幕图层 (确保置于控制层下方，不受控制栏显隐影响)
             AISubtitleOverlayView(subtitle: viewModel.currentSubtitle)
 
             // 手势浮层指示器 HUD
@@ -129,7 +129,10 @@ public struct FullscreenVideoPlayerView: View {
     // MARK: - 顶部导航条
     private var topNavigationBar: some View {
         HStack(spacing: 14) {
-            Button(action: onDismiss) {
+            Button(action: {
+                viewModel.cleanup()
+                onDismiss()
+            }) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white)

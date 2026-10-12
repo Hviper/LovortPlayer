@@ -87,6 +87,11 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
+    public func pause() {
+        player?.pause()
+        isPlaying = false
+    }
+
     public func seek(to time: TimeInterval) {
         let cmTime = CMTime(seconds: max(0, min(time, duration)), preferredTimescale: 600)
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -196,7 +201,7 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     private func setupTimeObserver() {
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let interval = CMTime(seconds: 0.3, preferredTimescale: 600)
         timeObserverToken = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             Task { @MainActor [weak self] in
                 guard let self = self, !self.isScrubbing else { return }
@@ -218,10 +223,15 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func cleanup() {
+        // 彻底暂停并置空 player，防止后台发声
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        isPlaying = false
+
         saveCurrentProgress()
         MediaLibraryManager.shared.reloadLibrary()
         if let token = timeObserverToken {
-            player?.removeTimeObserver(token)
             timeObserverToken = nil
         }
         controlsHideTimer?.cancel()

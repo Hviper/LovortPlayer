@@ -9,8 +9,31 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
         self.baseURL = baseURL
     }
 
+    /// 创建支持系统代理/Clash 代理与自定义 HTTP 代理的 URLSession
+    private func createProxyAwareSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 300
+
+        // 检查用户是否自定义了本地代理（例如 127.0.0.1:7890）
+        let proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
+        let proxyPort = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
+
+        if !proxyHost.isEmpty && proxyPort > 0 {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: true,
+                kCFNetworkProxiesHTTPProxy as String: proxyHost,
+                kCFNetworkProxiesHTTPPort as String: proxyPort,
+                kCFNetworkProxiesHTTPSEnable as String: true,
+                kCFNetworkProxiesHTTPSProxy as String: proxyHost,
+                kCFNetworkProxiesHTTPSPort as String: proxyPort
+            ]
+        }
+        return URLSession(configuration: config)
+    }
+
     public func transcribeAndTranslate(audioURL: URL, targetLanguage: String = "zh") async throws -> [SubtitleLine] {
-        // 1. 调用真实 Whisper API 转录获取 SRT 文本
+        // 1. 调用 Whisper API 转录获取 SRT 文本
         let srtText = try await requestWhisperTranscription(audioURL: audioURL)
         let parsedLines = SRTParser.parse(srtString: srtText)
 
@@ -55,9 +78,10 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let session = createProxyAwareSession()
+        let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "HTTP Error"
+            let errorMsg = String(data: data, encoding: .utf8) ?? "HTTP 响应错误"
             throw NSError(domain: "WhisperAPIError", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
         }
 
@@ -65,7 +89,6 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
     }
 
     private func requestTranslation(lines: [SubtitleLine], targetLanguage: String) async throws -> [SubtitleLine] {
-        // 构建简单的翻译 Prompt 发送到 chat/completions
         let endpoint = baseURL.appendingPathComponent("chat/completions")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -89,14 +112,14 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
 
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        let session = createProxyAwareSession()
+        guard let (data, response) = try? await session.data(for: request),
               let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],
               let content = message["content"] as? String else {
-            // 如果翻译失败，退回原文
             return lines
         }
 
