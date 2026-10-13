@@ -57,21 +57,33 @@ public struct SettingsView: View {
                     .padding(.top, 8)
                 }
             }
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Text("设置")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.white)
                 }
+                #if os(iOS)
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("完成") { dismiss() }
                         .foregroundColor(settings.themeColor.color)
                         .fontWeight(.semibold)
                 }
+                #else
+                ToolbarItem(placement: .automatic) {
+                    Button("完成") { dismiss() }
+                        .foregroundColor(settings.themeColor.color)
+                        .fontWeight(.semibold)
+                }
+                #endif
             }
+            #if os(iOS)
             .toolbarBackground(Color(red: 0.04, green: 0.04, blue: 0.05), for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            #endif
         }
         .onAppear { settings.refreshCacheSize() }
         .confirmationDialog("确认清除缓存？", isPresented: $showClearCacheConfirm, titleVisibility: .visible) {
