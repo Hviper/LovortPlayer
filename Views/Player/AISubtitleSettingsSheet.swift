@@ -54,7 +54,7 @@ public struct AISubtitleSettingsSheet: View {
                 let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
                 self.proxyPort = port > 0 ? String(port) : ""
 
-                let token = authManager.currentProfile?.token ?? self.apiKey
+                let token = authManager.currentProfile?.accessToken ?? self.apiKey
                 if !token.isEmpty {
                     Task {
                         await modelManager.fetchAvailableModels(token: token)
@@ -180,7 +180,7 @@ public struct AISubtitleSettingsSheet: View {
                         .tint(.white.opacity(0.7))
                 } else {
                     Button(action: {
-                        let token = authManager.currentProfile?.token ?? apiKey
+                        let token = authManager.currentProfile?.accessToken ?? apiKey
                         Task {
                             await modelManager.fetchAvailableModels(token: token)
                         }
