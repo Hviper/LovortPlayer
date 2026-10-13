@@ -40,6 +40,21 @@
     <string>需要访问相册以导入或保存视频</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>需要权限将剪辑后的视频保存到系统相册</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>使用语音识别分析视频音轨以生成双语字幕</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLName</key>
+            <string>com.lovort.player.auth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>lovortplayer</string>
+            </array>
+        </dict>
+    </array>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

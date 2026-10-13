@@ -12,6 +12,9 @@ public final class MediaLibraryManager: ObservableObject {
 
     @Published public var videos: [VideoItem] = []
     @Published public var isLoading: Bool = false
+    @Published public var isImporting: Bool = false
+    @Published public var importStatusText: String = ""
+    @Published public var importSuccessMessage: String? = nil
 
     private let fileManager = FileManager.default
 
@@ -115,23 +118,51 @@ public final class MediaLibraryManager: ObservableObject {
         )
     }
 
-    /// 导入外部文件
-    public func importFile(from sourceURL: URL, isHidden: Bool = false) async throws {
+    /// 导入外部文件（在后台线程执行大文件 IO，避免 2GB+ 视频卡死主线程，并提供实时状态反馈）
+    public func importFile(from sourceURL: URL, isHidden: Bool = false, moveInsteadOfCopy: Bool = false) async throws {
         let destFolder = isHidden ? vaultDirectory : documentsDirectory
-        let destURL = destFolder.appendingPathComponent(sourceURL.lastPathComponent)
+        let fileName = sourceURL.lastPathComponent
+        let destURL = destFolder.appendingPathComponent(fileName)
 
-        let shouldStopAccess = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if shouldStopAccess {
-                sourceURL.stopAccessingSecurityScopedResource()
+        isImporting = true
+        importStatusText = "正在导入 \(fileName)..."
+
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                let fm = FileManager.default
+                let shouldStopAccess = sourceURL.startAccessingSecurityScopedResource()
+                defer {
+                    if shouldStopAccess {
+                        sourceURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+
+                if fm.fileExists(atPath: destURL.path) {
+                    try fm.removeItem(at: destURL)
+                }
+                if moveInsteadOfCopy {
+                    try fm.moveItem(at: sourceURL, to: destURL)
+                } else {
+                    try fm.copyItem(at: sourceURL, to: destURL)
+                }
+            }.value
+
+            importStatusText = "正在生成缩略图与媒体索引..."
+            let scanned = await scanLocalVideos()
+            self.videos = scanned
+            isImporting = false
+            importSuccessMessage = "已成功导入：\(fileName)"
+
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if self.importSuccessMessage == "已成功导入：\(fileName)" {
+                    self.importSuccessMessage = nil
+                }
             }
+        } catch {
+            isImporting = false
+            throw error
         }
-
-        if fileManager.fileExists(atPath: destURL.path) {
-            try fileManager.removeItem(at: destURL)
-        }
-        try fileManager.copyItem(at: sourceURL, to: destURL)
-        reloadLibrary()
     }
 
     /// 将视频移动到保险箱（支持真实 AES-256 加密落盘）/ 移出保险箱

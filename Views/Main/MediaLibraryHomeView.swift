@@ -17,6 +17,7 @@ public struct MediaLibraryHomeView: View {
     @State private var isDecoySpace: Bool = false
 
     #if os(iOS)
+    @State private var isPhotosPickerPresented: Bool = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     #endif
 
@@ -49,6 +50,32 @@ public struct MediaLibraryHomeView: View {
                 VStack(spacing: 0) {
                     // 自定义 Lovort 导航条
                     customHeaderBar
+
+                    // 导入完成提示条
+                    if let successMsg = libraryManager.importSuccessMessage {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text(successMsg)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color.green.opacity(0.18))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.green.opacity(0.4), lineWidth: 1)
+                                )
+                        )
+                        .padding(.horizontal, 20)
+                        .padding(.top, 6)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
 
                     // 分类 Tabs
                     tabsBar
@@ -90,9 +117,69 @@ public struct MediaLibraryHomeView: View {
                         }
                     }
                 }
+
+                // 大文件导入实时进度 HUD 浮层（解决 2GB+ 大视频导入无反馈问题）
+                if libraryManager.isImporting {
+                    Color.black.opacity(0.55)
+                        .ignoresSafeArea()
+                        .transition(.opacity)
+
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .cyan))
+                            .scaleEffect(1.4)
+
+                        Text("正在高速导入视频")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+
+                        Text(libraryManager.importStatusText.isEmpty ? "正在后台处理大文件，请稍候..." : libraryManager.importStatusText)
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.75))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .padding(.horizontal, 12)
+                    }
+                    .padding(.vertical, 28)
+                    .padding(.horizontal, 24)
+                    .frame(maxWidth: 290)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20)
+                            .fill(Color(red: 0.1, green: 0.11, blue: 0.14).opacity(0.96))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 20)
+                                    .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+                            )
+                    )
+                    .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
+                }
             }
             #if os(iOS)
             .navigationBarHidden(true)
+            .photosPicker(
+                isPresented: $isPhotosPickerPresented,
+                selection: $selectedPhotoItems,
+                matching: .videos
+            )
+            .onChange(of: selectedPhotoItems) { newItems in
+                guard !newItems.isEmpty else { return }
+                let itemsToImport = newItems
+                selectedPhotoItems.removeAll()
+                Task {
+                    libraryManager.isImporting = true
+                    libraryManager.importStatusText = "正在从系统相册提取大视频文件，请稍候..."
+                    for item in itemsToImport {
+                        if let movie = try? await item.loadTransferable(type: VideoTransferable.self) {
+                            try? await libraryManager.importFile(
+                                from: movie.url,
+                                isHidden: filterTab == 2,
+                                moveInsteadOfCopy: true
+                            )
+                        }
+                    }
+                    libraryManager.isImporting = false
+                }
+            }
             #endif
             .fullScreenCover(item: $selectedVideo) { video in
                 FullscreenVideoPlayerView(
@@ -111,11 +198,14 @@ public struct MediaLibraryHomeView: View {
                 allowedContentTypes: [.movie, .video],
                 allowsMultipleSelection: true
             ) { result in
-                if case .success(let urls) = result {
+                if case .success(let urls) = result, !urls.isEmpty {
                     Task {
+                        libraryManager.isImporting = true
+                        libraryManager.importStatusText = "正在准备导入大视频文件..."
                         for url in urls {
                             try? await libraryManager.importFile(from: url, isHidden: filterTab == 2)
                         }
+                        libraryManager.isImporting = false
                     }
                 }
             }
@@ -166,10 +256,7 @@ public struct MediaLibraryHomeView: View {
             // 导入视频按钮
             Menu {
                 #if os(iOS)
-                PhotosPicker(
-                    selection: $selectedPhotoItems,
-                    matching: .videos
-                ) {
+                Button(action: { isPhotosPickerPresented = true }) {
                     Label("从相册导入", systemImage: "photo.on.rectangle")
                 }
                 #endif
@@ -183,18 +270,6 @@ public struct MediaLibraryHomeView: View {
                     .frame(width: 36, height: 36)
                     .background(Circle().fill(Color.white.opacity(0.1)))
             }
-            #if os(iOS)
-            .onChange(of: selectedPhotoItems) { newItems in
-                Task {
-                    for item in newItems {
-                        if let movie = try? await item.loadTransferable(type: VideoTransferable.self) {
-                            try? await libraryManager.importFile(from: movie.url, isHidden: filterTab == 2)
-                        }
-                    }
-                    selectedPhotoItems.removeAll()
-                }
-            }
-            #endif
 
             // 局域网传输按钮
             Button(action: { showLANUpload = true }) {
