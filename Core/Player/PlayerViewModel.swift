@@ -45,7 +45,7 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var isExportingClip: Bool = false
     @Published public var exportMessage: String? = nil
 
-    private var currentVideoURL: URL?
+    @Published public private(set) var currentVideoURL: URL?
     private var timeObserverToken: Any?
     private var controlsHideTimer: Task<Void, Never>?
 

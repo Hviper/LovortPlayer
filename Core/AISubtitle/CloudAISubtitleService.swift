@@ -404,6 +404,7 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
                         break
                     }
                 }
+            }
         }
 
         // 2. 如果未通过 Codex OAuth 拿到翻译，走标准 OpenAI chat/completions

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import CryptoKit
 
 public struct CommunitySubtitleResult: Identifiable, Sendable {
@@ -116,11 +117,15 @@ public final class ShooterSubtitleService: Sendable {
     public func downloadAndParseSubtitle(from url: URL) async throws -> [SubtitleLine] {
         let (data, _) = try await URLSession.shared.data(from: url)
         // 尝试 UTF-8 或 GB18030 / Shift-JIS 编码解码
+        let gb18030Raw = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
+        let shiftJISRaw = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.shiftJIS.rawValue))
+
         let content: String
         if let s = String(data: data, encoding: .utf8) {
             content = s
-        } else if let cfEncoding = CFStringConvertNSStringEncodingToEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)) as NSStringEncoding?,
-                  let s = String(data: data, encoding: String.Encoding(rawValue: cfEncoding)) {
+        } else if let s = String(data: data, encoding: String.Encoding(rawValue: gb18030Raw)) {
+            content = s
+        } else if let s = String(data: data, encoding: String.Encoding(rawValue: shiftJISRaw)) {
             content = s
         } else {
             content = String(decoding: data, as: UTF8.self)
