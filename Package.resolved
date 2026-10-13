@@ -1,5 +1,5 @@
 {
-  "originHash" : "3e0e4b79eda9803778ccb0424bc7b907e5579ff2dddf2843ea5b16389e648f70",
+  "originHash" : "cfa6f6fd57ad163f168e58dc04290f72db2d95faaf85333863a1f9e23d0d4501",
   "pins" : [
     {
       "identity" : "argmax-oss-swift",
@@ -26,15 +26,6 @@
       "state" : {
         "revision" : "bdfa2da39bb18865b317c4ffd08cdef5f8efc043",
         "version" : "2.3.4"
-      }
-    },
-    {
-      "identity" : "libdav1d-xcode",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/SDWebImage/libdav1d-Xcode.git",
-      "state" : {
-        "revision" : "6a389f3cf98bb24d45255ed330f702309b312f8d",
-        "version" : "1.1.0"
       }
     },
     {

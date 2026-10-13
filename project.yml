@@ -5,9 +5,6 @@ options:
   deploymentTarget:
     iOS: "18.0"
 packages:
-  libdav1d:
-    url: https://github.com/SDWebImage/libdav1d-Xcode.git
-    exactVersion: "1.1.0"
   whisperkit:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
     exactVersion: "1.1.1"
@@ -24,8 +21,6 @@ targets:
       - path: Core
       - path: Views
     dependencies:
-      - package: libdav1d
-        product: libdav1d
       - package: whisperkit
         product: WhisperKit
       - package: ksplayer
