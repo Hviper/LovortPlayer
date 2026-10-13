@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 import PhotosUI
@@ -33,14 +34,14 @@ public struct MediaLibraryHomeView: View {
 
         switch filterTab {
         case 1:
-            // 精彩剪辑
-            return libraryManager.videos.filter { $0.fileURL.path.contains("/Clips/") }
+            // 精彩剪辑（严格排除私密文件夹内容）
+            return libraryManager.videos.filter { $0.fileURL.path.contains("/Clips/") && !$0.isHidden }
         case 2:
-            // 隐私保险箱
+            // 私密文件夹（仅在私密文件夹 Tab 中展示隐藏视频）
             return libraryManager.videos.filter { $0.isHidden }
         default:
-            // 全部（未解锁时不展示隐私视频）
-            return libraryManager.videos.filter { showVaultUnlocked ? true : !$0.isHidden }
+            // 全部（永远只展示公开视频，严格过滤私密文件夹的内容）
+            return libraryManager.videos.filter { !$0.isHidden }
         }
     }
 
@@ -120,7 +121,7 @@ public struct MediaLibraryHomeView: View {
                     }
                 }
 
-                // 大文件导入实时进度 HUD 浮层（解决 2GB+ 大视频导入无反馈问题）
+                // 导入实时进度 HUD 浮层（大文件/多文件导入实时动效与进度反馈）
                 if libraryManager.isImporting {
                     Color.black.opacity(0.55)
                         .ignoresSafeArea()
@@ -128,14 +129,14 @@ public struct MediaLibraryHomeView: View {
 
                     VStack(spacing: 16) {
                         ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle(tint: .cyan))
+                            .progressViewStyle(CircularProgressViewStyle(tint: settings.themeColor.color))
                             .scaleEffect(1.4)
 
-                        Text("正在高速导入视频")
+                        Text("正在导入视频")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.white)
 
-                        Text(libraryManager.importStatusText.isEmpty ? "正在后台处理大文件，请稍候..." : libraryManager.importStatusText)
+                        Text(libraryManager.importStatusText.isEmpty ? "正在后台处理文件，请稍候..." : libraryManager.importStatusText)
                             .font(.system(size: 13))
                             .foregroundColor(.white.opacity(0.75))
                             .multilineTextAlignment(.center)
@@ -150,10 +151,11 @@ public struct MediaLibraryHomeView: View {
                             .fill(Color(red: 0.1, green: 0.11, blue: 0.14).opacity(0.96))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 20)
-                                    .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+                                    .stroke(settings.themeColor.color.opacity(0.35), lineWidth: 1)
                             )
                     )
                     .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
                 }
             }
             #if os(iOS)
@@ -168,18 +170,15 @@ public struct MediaLibraryHomeView: View {
                 let itemsToImport = newItems
                 selectedPhotoItems.removeAll()
                 Task {
+                    var urlsToImport: [URL] = []
                     libraryManager.isImporting = true
-                    libraryManager.importStatusText = "正在从系统相册提取大视频文件，请稍候..."
+                    libraryManager.importStatusText = "正在从系统相册提取视频，请稍候..."
                     for item in itemsToImport {
                         if let movie = try? await item.loadTransferable(type: VideoTransferable.self) {
-                            try? await libraryManager.importFile(
-                                from: movie.url,
-                                isHidden: filterTab == 2,
-                                moveInsteadOfCopy: true
-                            )
+                            urlsToImport.append(movie.url)
                         }
                     }
-                    libraryManager.isImporting = false
+                    await libraryManager.importFiles(from: urlsToImport, isHidden: filterTab == 2)
                 }
             }
             #endif
@@ -200,18 +199,17 @@ public struct MediaLibraryHomeView: View {
             }
             .fileImporter(
                 isPresented: $isFileImporterPresented,
-                allowedContentTypes: [.movie, .video],
+                allowedContentTypes: supportedVideoContentTypes,
                 allowsMultipleSelection: true
             ) { result in
-                if case .success(let urls) = result, !urls.isEmpty {
+                switch result {
+                case .success(let urls):
+                    guard !urls.isEmpty else { return }
                     Task {
-                        libraryManager.isImporting = true
-                        libraryManager.importStatusText = "正在准备导入大视频文件..."
-                        for url in urls {
-                            try? await libraryManager.importFile(from: url, isHidden: filterTab == 2)
-                        }
-                        libraryManager.isImporting = false
+                        await libraryManager.importFiles(from: urls, isHidden: filterTab == 2)
                     }
+                case .failure(let error):
+                    print("文件选择器未选择或出错: \(error.localizedDescription)")
                 }
             }
             .alert("输入保险箱密码", isPresented: $showPinDialog) {
@@ -236,22 +234,33 @@ public struct MediaLibraryHomeView: View {
         }
     }
 
+    private var supportedVideoContentTypes: [UTType] {
+        var types: [UTType] = [.movie, .video, .quickTimeMovie, .mpeg4Movie]
+        let extensions = ["mkv", "mp4", "mov", "avi", "webm", "flv", "m4v", "ts", "wmv", "3gp"]
+        for ext in extensions {
+            if let type = UTType(filenameExtension: ext) {
+                types.append(type)
+            }
+        }
+        return types
+    }
+
     // MARK: - 顶栏
     private var customHeaderBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(filterTab == 2 ? (isDecoySpace ? "访客空间" : "私密保险箱") : "媒体库")
+                    Text(filterTab == 2 ? (isDecoySpace ? "访客空间" : "私密文件夹") : "媒体库")
                         .font(.system(size: 26, weight: .bold))
-                        .foregroundColor(filterTab == 2 || showVaultUnlocked ? settings.themeColor.color : .white)
+                        .foregroundColor(filterTab == 2 ? settings.themeColor.color : .white)
 
-                    if showVaultUnlocked {
+                    if filterTab == 2 && showVaultUnlocked {
                         Image(systemName: "lock.open.fill")
                             .font(.system(size: 14))
                             .foregroundColor(settings.themeColor.color)
                     }
                 }
-                Text(showVaultUnlocked ? "AES-256 空间已解锁 (\(filteredVideos.count))" : "本地视频 (\(filteredVideos.count))")
+                Text(filterTab == 2 ? (showVaultUnlocked ? "私密空间已解锁 (\(filteredVideos.count))" : "安全加密存储 (\(filteredVideos.count))") : "本地视频 (\(filteredVideos.count))")
                     .font(.system(size: 12))
                     .foregroundColor(.white.opacity(0.5))
             }

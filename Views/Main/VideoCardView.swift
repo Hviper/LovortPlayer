@@ -108,7 +108,7 @@ public struct VideoCardView: View {
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.cyan.opacity(0.9))
                         } else {
-                            Text(video.isHidden ? "私密保险" : "AI 字幕就绪")
+                            Text(video.isHidden ? "私密文件" : "AI 字幕就绪")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .white.opacity(0.4))
                         }
@@ -130,7 +130,7 @@ public struct VideoCardView: View {
         .contextMenu {
             if let onToggleHide = onToggleHide {
                 Button(action: onToggleHide) {
-                    Label(video.isHidden ? "移出保险箱" : "移入保险箱", systemImage: video.isHidden ? "lock.open" : "lock.fill")
+                    Label(video.isHidden ? "移出私密文件夹" : "移入私密文件夹", systemImage: video.isHidden ? "lock.open" : "lock.fill")
                 }
             }
             if let onDelete = onDelete {

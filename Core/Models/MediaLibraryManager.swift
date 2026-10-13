@@ -121,7 +121,7 @@ public final class MediaLibraryManager: ObservableObject {
         )
     }
 
-    /// 导入外部文件（在后台线程执行大文件 IO，避免 2GB+ 视频卡死主线程，并提供实时状态反馈）
+    /// 导入单个外部文件（在后台线程执行大文件 IO，避免卡死主线程）
     public func importFile(from sourceURL: URL, isHidden: Bool = false, moveInsteadOfCopy: Bool = false) async throws {
         let destFolder = isHidden ? vaultDirectory : documentsDirectory
         let fileName = sourceURL.lastPathComponent
@@ -130,16 +130,16 @@ public final class MediaLibraryManager: ObservableObject {
         isImporting = true
         importStatusText = "正在导入 \(fileName)..."
 
+        let hasAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasAccess {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
         do {
             try await Task.detached(priority: .userInitiated) {
                 let fm = FileManager.default
-                let shouldStopAccess = sourceURL.startAccessingSecurityScopedResource()
-                defer {
-                    if shouldStopAccess {
-                        sourceURL.stopAccessingSecurityScopedResource()
-                    }
-                }
-
                 if fm.fileExists(atPath: destURL.path) {
                     try fm.removeItem(at: destURL)
                 }
@@ -165,6 +165,66 @@ public final class MediaLibraryManager: ObservableObject {
         } catch {
             isImporting = false
             throw error
+        }
+    }
+
+    /// 批量导入外部文件（用于从文件或相册导入，提供平滑加载 HUD 样式及实时多文件进度）
+    public func importFiles(from sourceURLs: [URL], isHidden: Bool = false) async {
+        guard !sourceURLs.isEmpty else { return }
+
+        isImporting = true
+        importStatusText = "正在准备导入文件..."
+
+        var successCount = 0
+        var lastSuccessName = ""
+
+        for (index, sourceURL) in sourceURLs.enumerated() {
+            let fileName = sourceURL.lastPathComponent
+            importStatusText = sourceURLs.count > 1 ? "正在导入 (\(index + 1)/\(sourceURLs.count)): \(fileName)" : "正在导入: \(fileName)"
+
+            let hasAccess = sourceURL.startAccessingSecurityScopedResource()
+
+            let destFolder = isHidden ? vaultDirectory : documentsDirectory
+            let destURL = destFolder.appendingPathComponent(fileName)
+
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    let fm = FileManager.default
+                    if fm.fileExists(atPath: destURL.path) {
+                        try fm.removeItem(at: destURL)
+                    }
+                    try fm.copyItem(at: sourceURL, to: destURL)
+                }.value
+                successCount += 1
+                lastSuccessName = fileName
+            } catch {
+                print("导入文件失败: \(fileName), error: \(error)")
+            }
+
+            if hasAccess {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        importStatusText = "正在生成缩略图与媒体索引..."
+        let scanned = await scanLocalVideos()
+        self.videos = scanned
+
+        // 保留至少 300ms 动画平滑过渡，避免瞬间闪退
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        isImporting = false
+
+        if successCount > 0 {
+            if successCount == 1 {
+                importSuccessMessage = "已成功导入：\(lastSuccessName)"
+            } else {
+                importSuccessMessage = "已成功导入 \(successCount) 个视频文件"
+            }
+
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                self.importSuccessMessage = nil
+            }
         }
     }
 
