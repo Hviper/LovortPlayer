@@ -3,6 +3,7 @@ import SwiftUI
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
     @StateObject private var authManager = AuthManager.shared
+    @ObservedObject private var modelManager = AIModelManager.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var apiKey: String = ""
@@ -124,7 +125,105 @@ public struct AISubtitleSettingsSheet: View {
                                 .fill(Color.white.opacity(0.06))
                         )
 
-                        // 2. 核心操作：离线先借助大模型为该视频生成字幕
+                        // 2. 当前翻译大模型 (可自由切换)
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                Text("当前大模型 (可自由切换)")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.6))
+                                Spacer()
+                                if modelManager.isFetchingModels {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                        .tint(.white.opacity(0.7))
+                                } else {
+                                    Button(action: {
+                                        let token = authManager.currentProfile?.token ?? apiKey
+                                        Task {
+                                            await modelManager.fetchAvailableModels(token: token)
+                                        }
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "arrow.triangle.2.circlepath")
+                                                .font(.system(size: 11))
+                                            Text("刷新模型")
+                                                .font(.system(size: 11, weight: .medium))
+                                        }
+                                        .foregroundColor(AppSettings.shared.themeColor.color)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Capsule().fill(AppSettings.shared.themeColor.color.opacity(0.12)))
+                                    }
+                                }
+                            }
+
+                            // 当前选中模型展示 & 切换菜单
+                            Menu {
+                                ForEach(modelManager.availableModels) { model in
+                                    Button(action: {
+                                        modelManager.selectModel(model.id)
+                                    }) {
+                                        HStack {
+                                            Text(model.displayName)
+                                            if let badge = model.badge {
+                                                Text(" [\(badge)]")
+                                            }
+                                            if modelManager.selectedModelID == model.id {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack(spacing: 6) {
+                                            Text(modelManager.currentModelInfo.displayName)
+                                                .font(.system(size: 15, weight: .bold))
+                                                .foregroundColor(.white)
+                                            if let badge = modelManager.currentModelInfo.badge {
+                                                Text(badge)
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundColor(AppSettings.shared.themeColor.color)
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Capsule().fill(AppSettings.shared.themeColor.color.opacity(0.15)))
+                                            }
+                                        }
+                                        Text(modelManager.currentModelInfo.description)
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.white.opacity(0.55))
+                                            .lineLimit(2)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(AppSettings.shared.themeColor.color)
+                                }
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color.white.opacity(0.05))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(AppSettings.shared.themeColor.color.opacity(0.35), lineWidth: 1)
+                                )
+                            }
+
+                            if let msg = modelManager.fetchMessage {
+                                Text(msg)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.green.opacity(0.9))
+                            }
+                        }
+                        .padding(16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(Color.white.opacity(0.06))
+                        )
+
+                        // 3. 核心操作：离线先借助大模型为该视频生成字幕
                         VStack(alignment: .leading, spacing: 14) {
                             Text("视频字幕离线预生成")
                                 .font(.system(size: 13, weight: .semibold))
@@ -326,6 +425,13 @@ public struct AISubtitleSettingsSheet: View {
                 self.proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
                 let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
                 self.proxyPort = port > 0 ? String(port) : ""
+
+                let token = authManager.currentProfile?.token ?? self.apiKey
+                if !token.isEmpty {
+                    Task {
+                        await modelManager.fetchAvailableModels(token: token)
+                    }
+                }
             }
         }
     }

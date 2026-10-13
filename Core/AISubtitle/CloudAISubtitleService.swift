@@ -296,6 +296,10 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
 
         var translatedContent: String?
 
+        let activeModel = await MainActor.run {
+            AIModelManager.shared.selectedModelID
+        }
+
         // 1. 如果是 ChatGPT OAuth 订阅 Token (参考 pi-coding-agent 调用 chatgpt.com/backend-api/codex/responses)
         if !apiKey.hasPrefix("sk-"), let codexURL = URL(string: "https://chatgpt.com/backend-api/codex/responses") {
             var codexReq = URLRequest(url: codexURL)
@@ -308,7 +312,7 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
             }
 
             let codexPayload: [String: Any] = [
-                "model": "gpt-5.1-codex-mini",
+                "model": activeModel,
                 "instructions": "You are a professional movie subtitle translator.",
                 "input": [
                     [
@@ -349,7 +353,7 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
             let payload: [String: Any] = [
-                "model": "gpt-4o-mini",
+                "model": activeModel,
                 "messages": [
                     ["role": "system", "content": "You are a professional movie subtitle translator."],
                     ["role": "user", "content": prompt]
