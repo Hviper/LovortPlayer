@@ -29,10 +29,36 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         UserDefaults.standard.set(key, forKey: openAIKeyStorageKey)
     }
 
-    /// 提取视频音轨转换为兼容的 m4a 音频
+    /// 提取视频音轨转换为兼容的 m4a 音频（针对多音轨视频智能匹配日语动漫音轨或主音轨）
     public func extractAudioTrack(from videoURL: URL, outputAudioURL: URL) async throws {
         let asset = AVURLAsset(url: videoURL)
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+        let audioTracks = try? await asset.loadTracks(withMediaType: .audio)
+
+        var targetTrack: AVAssetTrack? = nil
+        if let tracks = audioTracks, !tracks.isEmpty {
+            for track in tracks {
+                let lang = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
+                if lang.contains("ja") || lang.contains("jpn") {
+                    targetTrack = track
+                    break
+                }
+            }
+            if targetTrack == nil {
+                targetTrack = tracks.first
+            }
+        }
+
+        var sourceAsset: AVAsset = asset
+        if let selectedTrack = targetTrack, let tracks = audioTracks, tracks.count > 1 {
+            let composition = AVMutableComposition()
+            if let compAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid),
+               let timeRange = try? await selectedTrack.load(.timeRange) {
+                try? compAudioTrack.insertTimeRange(timeRange, of: selectedTrack, at: .zero)
+                sourceAsset = composition
+            }
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: sourceAsset, presetName: AVAssetExportPresetAppleM4A) else {
             throw NSError(domain: "AudioExtractError", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法创建音频导出会话"])
         }
         exportSession.outputURL = outputAudioURL
@@ -52,6 +78,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         let candidateURLs = [
             base.appendingPathExtension("srt"),
             base.appendingPathExtension("zh.srt"),
+            base.appendingPathExtension("ja.srt"),
             base.appendingPathExtension("en.srt")
         ]
         for url in candidateURLs {
@@ -73,10 +100,24 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         sourceLanguage: String = "自动检测",
         onProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> [SubtitleLine] {
-        // 1. 优先检查本地是否已有已生成的同名 SRT（若有直接秒级装载离线字幕）
+        // 1. 优先检查本地是否已有同名 SRT（若有直接秒级装载离线字幕）
         if let existing = loadLocalSRTIfAvailable(for: videoURL) {
             onProgress?("已加载本地离线字幕 (共 \(existing.count) 句)")
             return existing
+        }
+
+        // 2. 社区字幕库智能检索（开源射手网 / 动漫字幕组精校库秒级匹配）
+        onProgress?("正在社区字幕组库检索该视频是否有精校字幕...")
+        if let communitySubs = try? await ShooterSubtitleService.shared.fetchCommunitySubtitles(videoURL: videoURL),
+           let bestSub = communitySubs.first {
+            onProgress?("找到社区精校字幕：\(bestSub.desc)，正在秒级同步...")
+            if let lines = try? await ShooterSubtitleService.shared.downloadAndParseSubtitle(from: bestSub.downloadURL), !lines.isEmpty {
+                let targetSRTURL = videoURL.deletingPathExtension().appendingPathExtension("srt")
+                let srtContent = SRTParser.generateSRT(from: lines)
+                try? srtContent.write(to: targetSRTURL, atomically: true, encoding: .utf8)
+                onProgress?("✅ 已成功匹配社区字幕组精校字幕 (共 \(lines.count) 句)")
+                return lines
+            }
         }
 
         // 2. 读取认证 Key（优先读取手动填写的 OpenAI Key，若无则读取已登录的 ChatGPT Plus/Pro 订阅 Token）

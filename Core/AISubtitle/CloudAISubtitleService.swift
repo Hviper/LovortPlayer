@@ -93,29 +93,43 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
 
         guard totalDuration > 0 else { return [] }
 
-        // 选择最佳语言 Locale
-        var locale = Locale(identifier: "zh-CN")
-        if sourceLanguage.contains("英") || sourceLanguage.lowercased().contains("en") {
-            locale = Locale(identifier: "en-US")
-        } else if sourceLanguage.contains("日") || sourceLanguage.lowercased().contains("ja") {
+        // 选择最佳语言 Locale (优先支持动漫日语、欧美影视英语、华语与韩语)
+        var locale = Locale(identifier: "ja-JP") // 动漫影视优先默认日语
+        let lowerLang = sourceLanguage.lowercased()
+        if lowerLang.contains("日") || lowerLang.contains("ja") || lowerLang.contains("jp") || lowerLang.contains("动漫") || lowerLang.contains("anime") {
             locale = Locale(identifier: "ja-JP")
-        } else if let sysLocale = SFSpeechRecognizer.supportedLocales().first(where: { $0.identifier == Locale.current.identifier }) {
-            locale = sysLocale
+        } else if lowerLang.contains("英") || lowerLang.contains("en") {
+            locale = Locale(identifier: "en-US")
+        } else if lowerLang.contains("中") || lowerLang.contains("zh") || lowerLang.contains("国语") || lowerLang.contains("普通话") {
+            locale = Locale(identifier: "zh-CN")
+        } else if lowerLang.contains("韩") || lowerLang.contains("ko") {
+            locale = Locale(identifier: "ko-KR")
+        } else {
+            // "自动检测"：检查文件名或当前环境
+            let filename = audioURL.lastPathComponent.lowercased()
+            if filename.contains("anime") || filename.contains("raw") || filename.contains("ep") || filename.contains("sub") || filename.contains("ova") || filename.contains("movie") || filename.contains("bebop") || filename.contains("jin") {
+                locale = Locale(identifier: "ja-JP")
+            } else if let sysLocale = SFSpeechRecognizer.supportedLocales().first(where: { $0.identifier == Locale.current.identifier }) {
+                locale = sysLocale
+            } else {
+                locale = Locale(identifier: "ja-JP")
+            }
         }
 
-        let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
+        let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(locale: Locale(identifier: "ja-JP")) ?? SFSpeechRecognizer()
         guard let recognizer = recognizer, recognizer.isAvailable else { return [] }
 
         // 如果时长小于 45 秒，直接单次识别
         if totalDuration <= 45.0 {
-            return await recognizeSingleAudioClip(audioURL: audioURL, recognizer: recognizer, timeOffset: 0)
+            return await recognizeSingleAudioClip(audioURL: audioURL, recognizer: recognizer, locale: locale, timeOffset: 0)
         }
 
-        // 长音频按 35 秒切片依次识别
-        let sliceDuration: TimeInterval = 35.0
+        // 长音频采用 32 秒切片，步长 28 秒（4秒滑动交叠，防止任何台词被截断在切片边界）
+        let sliceDuration: TimeInterval = 32.0
+        let stepDuration: TimeInterval = 28.0
         var currentStart: TimeInterval = 0
         var allLines: [SubtitleLine] = []
-        let totalSlices = Int(ceil(totalDuration / sliceDuration))
+        let totalSlices = Int(ceil(totalDuration / stepDuration))
         var sliceIndex = 1
 
         while currentStart < totalDuration {
@@ -134,17 +148,41 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
                 let sliceLines = await recognizeSingleAudioClip(
                     audioURL: sliceURL,
                     recognizer: recognizer,
+                    locale: locale,
                     timeOffset: currentStart
                 )
-                allLines.append(contentsOf: sliceLines)
+                // 智能合并交叠段，去重相邻时间戳相同的台词
+                allLines = mergeSubtitleLines(existing: allLines, incoming: sliceLines)
                 try? FileManager.default.removeItem(at: sliceURL)
             }
 
-            currentStart += thisDuration
+            currentStart += stepDuration
             sliceIndex += 1
         }
 
         return allLines
+    }
+
+    /// 智能合并重叠分片的台词，避免重复
+    private func mergeSubtitleLines(existing: [SubtitleLine], incoming: [SubtitleLine]) -> [SubtitleLine] {
+        var merged = existing
+        for line in incoming {
+            if let last = merged.last {
+                // 如果与上一句时间差小于 2 秒，且文本高度重叠或完全一致，去重
+                if abs(last.startTime - line.startTime) < 2.0 {
+                    if last.originalText == line.originalText || last.originalText.contains(line.originalText) {
+                        continue
+                    }
+                    if line.originalText.contains(last.originalText) {
+                        merged.removeLast()
+                        merged.append(line)
+                        continue
+                    }
+                }
+            }
+            merged.append(line)
+        }
+        return merged
     }
 
     /// 截取音频的一个短分片
@@ -165,43 +203,60 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
         return exportSession.status == .completed
     }
 
-    /// 识别单个短音频片段并映射全局时间戳
+    /// 识别单个短音频片段并映射全局时间戳（持续保存 latestTranscription，EOF 不丢弃非 final 结果）
     private func recognizeSingleAudioClip(
         audioURL: URL,
         recognizer: SFSpeechRecognizer,
+        locale: Locale,
         timeOffset: TimeInterval
     ) async -> [SubtitleLine] {
         let request = SFSpeechURLRecognitionRequest(url: audioURL)
         request.shouldReportPartialResults = false
 
-        final class ResumeGate: @unchecked Sendable {
+        final class RecognitionHolder: @unchecked Sendable {
             var hasResumed = false
+            var bestTranscription: SFTranscription?
         }
-        let gate = ResumeGate()
+        let holder = RecognitionHolder()
 
         return await withCheckedContinuation { continuation in
             recognizer.recognitionTask(with: request) { result, error in
-                guard !gate.hasResumed else { return }
-                if let result = result, result.isFinal {
-                    gate.hasResumed = true
+                guard !holder.hasResumed else { return }
+                if let r = result {
+                    holder.bestTranscription = r.bestTranscription
+                }
+
+                if result?.isFinal == true || error != nil {
+                    holder.hasResumed = true
+                    guard let transcription = holder.bestTranscription else {
+                        continuation.resume(returning: [])
+                        return
+                    }
+
                     var lines: [SubtitleLine] = []
                     var currentText = ""
                     var chunkStart: TimeInterval = 0
                     var lastEnd: TimeInterval = 0
 
-                    for segment in result.bestTranscription.segments {
+                    let isCJK = locale.identifier.hasPrefix("ja") || locale.identifier.hasPrefix("zh")
+
+                    for segment in transcription.segments {
                         if currentText.isEmpty {
                             chunkStart = timeOffset + segment.timestamp
                         }
-                        currentText += (currentText.isEmpty ? "" : " ") + segment.substring
+                        let separator = (currentText.isEmpty || isCJK) ? "" : " "
+                        currentText += separator + segment.substring
                         lastEnd = timeOffset + segment.timestamp + segment.duration
 
-                        if currentText.count >= 32 || segment.substring.hasSuffix(".") || segment.substring.hasSuffix("?") || segment.substring.hasSuffix("!") || segment.substring.hasSuffix("。") || segment.substring.hasSuffix("？") || (lastEnd - chunkStart) >= 4.0 {
+                        let sub = segment.substring
+                        let isPunctuationEnd = sub.hasSuffix(".") || sub.hasSuffix("?") || sub.hasSuffix("!") || sub.hasSuffix("。") || sub.hasSuffix("？") || sub.hasSuffix("！") || sub.hasSuffix("…") || sub.hasSuffix("、")
+
+                        if currentText.count >= (isCJK ? 24 : 36) || isPunctuationEnd || (lastEnd - chunkStart) >= 4.5 {
                             lines.append(
                                 SubtitleLine(
                                     startTime: chunkStart,
                                     endTime: max(chunkStart + 1.2, lastEnd),
-                                    originalText: currentText,
+                                    originalText: currentText.trimmingCharacters(in: .whitespacesAndNewlines),
                                     translatedText: ""
                                 )
                             )
@@ -213,15 +268,12 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
                             SubtitleLine(
                                 startTime: chunkStart,
                                 endTime: max(chunkStart + 1.2, lastEnd),
-                                originalText: currentText,
+                                originalText: currentText.trimmingCharacters(in: .whitespacesAndNewlines),
                                 translatedText: ""
                             )
                         )
                     }
                     continuation.resume(returning: lines)
-                } else if error != nil {
-                    gate.hasResumed = true
-                    continuation.resume(returning: [])
                 }
             }
         }
@@ -290,7 +342,9 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
     private func requestTranslation(lines: [SubtitleLine], targetLanguage: String) async throws -> [SubtitleLine] {
         let textsToTranslate = lines.map { $0.originalText }.joined(separator: "\n---\n")
         let prompt = """
-        请将以下字幕文本逐句翻译成\(targetLanguage)，保持相同的行数和分隔符 '---'，只返回翻译结果，不要多余解释：
+        你是一位顶级专业动漫字幕组与影视本地化翻译专家。
+        请将以下原始台词逐句翻译为\(targetLanguage)，保持原汁原味的语境、角色性格与文化内涵（保留合适的动漫称呼与语气习惯，避免机械直译）。
+        严格保持相同的行数与 '---' 分隔符，只输出对应翻译文本：
         \(textsToTranslate)
         """
 
@@ -300,48 +354,56 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
             AIModelManager.shared.selectedModelID
         }
 
-        // 1. 如果是 ChatGPT OAuth 订阅 Token (参考 pi-coding-agent 调用 chatgpt.com/backend-api/codex/responses)
+        let fallbackCandidateModels = [activeModel, "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-4o-mini"]
+
+        // 1. 如果是 ChatGPT OAuth 订阅 Token (调用 chatgpt.com/backend-api/codex/responses)
         if !apiKey.hasPrefix("sk-"), let codexURL = URL(string: "https://chatgpt.com/backend-api/codex/responses") {
-            var codexReq = URLRequest(url: codexURL)
-            codexReq.httpMethod = "POST"
-            codexReq.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            codexReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            codexReq.setValue("responses=experimental", forHTTPHeaderField: "OpenAI-Beta")
-            if let accountID = extractChatGPTAccountID(from: apiKey) {
-                codexReq.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
-            }
-
-            let codexPayload: [String: Any] = [
-                "model": activeModel,
-                "instructions": "You are a professional movie subtitle translator.",
-                "input": [
-                    [
-                        "role": "user",
-                        "content": [
-                            ["type": "input_text", "text": prompt]
-                        ]
-                    ]
-                ],
-                "store": false
-            ]
-            codexReq.httpBody = try? JSONSerialization.data(withJSONObject: codexPayload)
-
             let session = createProxyAwareSession()
-            if let (data, response) = try? await session.data(for: codexReq),
-               let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let output = json["output"] as? [[String: Any]] {
-                for item in output {
-                    if let contentArr = item["content"] as? [[String: Any]] {
-                        for c in contentArr {
-                            if let text = c["text"] as? String, !text.isEmpty {
-                                translatedContent = text
-                                break
+            let accountID = extractChatGPTAccountID(from: apiKey)
+
+            for tryModel in fallbackCandidateModels {
+                var codexReq = URLRequest(url: codexURL)
+                codexReq.httpMethod = "POST"
+                codexReq.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                codexReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                codexReq.setValue("responses=experimental", forHTTPHeaderField: "OpenAI-Beta")
+                if let accountID = accountID {
+                    codexReq.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
+                }
+
+                let codexPayload: [String: Any] = [
+                    "model": tryModel,
+                    "instructions": "You are a professional anime and movie fansub translator. Translate dialogue into authentic natural subtitles.",
+                    "input": [
+                        [
+                            "role": "user",
+                            "content": [
+                                ["type": "input_text", "text": prompt]
+                            ]
+                        ]
+                    ],
+                    "store": false
+                ]
+                codexReq.httpBody = try? JSONSerialization.data(withJSONObject: codexPayload)
+
+                if let (data, response) = try? await session.data(for: codexReq),
+                   let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let output = json["output"] as? [[String: Any]] {
+                    for item in output {
+                        if let contentArr = item["content"] as? [[String: Any]] {
+                            for c in contentArr {
+                                if let text = c["text"] as? String, !text.isEmpty {
+                                    translatedContent = text
+                                    break
+                                }
                             }
                         }
                     }
+                    if translatedContent != nil {
+                        break
+                    }
                 }
-            }
         }
 
         // 2. 如果未通过 Codex OAuth 拿到翻译，走标准 OpenAI chat/completions

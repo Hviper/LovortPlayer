@@ -22,42 +22,72 @@ public final class AIModelManager: ObservableObject {
 
     private let storageKey = "LovortSelectedAIModelID"
 
-    /// 内置的经典与主流模型选项（覆盖 GPT-4o 旗舰、Mini 极速、Codex 专线与推理模型）
+    /// 内置的前沿主流模型选项（全面覆盖 GPT-6 Sol/Astra/Luna 旗舰与 GPT-5.6 系列）
     public static let defaultModels: [AIModelInfo] = [
+        AIModelInfo(
+            id: "gpt-6.1-sol",
+            displayName: "GPT-6.1 Sol",
+            description: "高智商深度推理与动漫俚语解析，双语字幕首选",
+            badge: "主力推荐"
+        ),
+        AIModelInfo(
+            id: "gpt-6-astra",
+            displayName: "GPT-6 Astra",
+            description: "GPT-6 顶配旗舰大模型，影视口吻与多角色理解顶级",
+            badge: "全能旗舰"
+        ),
+        AIModelInfo(
+            id: "gpt-6-sol",
+            displayName: "GPT-6 Sol",
+            description: "GPT-6 均衡主力模型，影视字幕极速高精翻译",
+            badge: "均衡推荐"
+        ),
+        AIModelInfo(
+            id: "gpt-6-luna",
+            displayName: "GPT-6 Luna",
+            description: "GPT-6 极速轻量模型，超低延迟处理长篇字幕",
+            badge: "轻量极速"
+        ),
+        AIModelInfo(
+            id: "gpt-5.6-sol",
+            displayName: "GPT-5.6 Sol",
+            description: "GPT-5.6 均衡主力模型，长文本稳定性极佳",
+            badge: "高精稳定"
+        ),
+        AIModelInfo(
+            id: "gpt-5.6-terra",
+            displayName: "GPT-5.6 Terra",
+            description: "GPT-5.6 专业批处理模型，适合长篇连续剧字幕",
+            badge: "专业批量"
+        ),
+        AIModelInfo(
+            id: "gpt-5.6-luna",
+            displayName: "GPT-5.6 Luna",
+            description: "GPT-5.6 极速轻量模型，基础台词极速对齐",
+            badge: "轻量版"
+        ),
         AIModelInfo(
             id: "gpt-4o-mini",
             displayName: "GPT-4o Mini",
-            description: "响应极速，性价比最高，日常双语字幕首选",
-            badge: "极速推荐"
+            description: "经典轻量模型，日常快速翻译",
+            badge: "经典"
         ),
         AIModelInfo(
             id: "gpt-4o",
-            displayName: "GPT-4o (全能旗舰)",
-            description: "影视俚语与多角色口吻理解最自然，翻译质量顶级",
-            badge: "旗舰高精"
+            displayName: "GPT-4o",
+            description: "经典全能旗舰模型",
+            badge: "经典"
         ),
         AIModelInfo(
             id: "gpt-5.1-codex-mini",
             displayName: "Codex Mini (专线)",
-            description: "ChatGPT 订阅专线通道，长篇字幕格式对齐最稳",
-            badge: "订阅专享"
-        ),
-        AIModelInfo(
-            id: "o3-mini",
-            displayName: "o3-mini (深度推理)",
-            description: "具备思维链深度理解，擅长科技/学术/复杂专业片",
-            badge: "深度推理"
-        ),
-        AIModelInfo(
-            id: "chatgpt-4o-latest",
-            displayName: "ChatGPT-4o Latest",
-            description: "OpenAI 官方持续迭代的最前沿 GPT-4o 模型",
-            badge: "前沿版"
+            description: "ChatGPT 订阅专线通道，长篇字幕格式对齐稳定",
+            badge: "专线"
         )
     ]
 
     @Published public var availableModels: [AIModelInfo] = defaultModels
-    @Published public var selectedModelID: String = "gpt-4o-mini" {
+    @Published public var selectedModelID: String = "gpt-6.1-sol" {
         didSet {
             UserDefaults.standard.set(selectedModelID, forKey: storageKey)
         }
@@ -66,7 +96,7 @@ public final class AIModelManager: ObservableObject {
     @Published public var fetchMessage: String? = nil
 
     private init() {
-        let saved = UserDefaults.standard.string(forKey: storageKey) ?? "gpt-4o-mini"
+        let saved = UserDefaults.standard.string(forKey: storageKey) ?? "gpt-6.1-sol"
         self.selectedModelID = saved
     }
 
@@ -78,8 +108,8 @@ public final class AIModelManager: ObservableObject {
         return AIModelInfo(
             id: selectedModelID,
             displayName: selectedModelID,
-            description: "自定义选择模型",
-            badge: "自定义"
+            description: "当前选择模型",
+            badge: "当前使用"
         )
     }
 
@@ -88,12 +118,12 @@ public final class AIModelManager: ObservableObject {
         self.selectedModelID = id
     }
 
-    /// 异步向 OpenAI 获取当前订阅/API Key 真实支持的模型列表
+    /// 异步向 OpenAI / ChatGPT 获取当前订阅真实支持的模型列表
     public func fetchAvailableModels(token: String) async {
         guard !token.isEmpty else { return }
 
         isFetchingModels = true
-        fetchMessage = "正在获取可用模型列表..."
+        fetchMessage = "正在探测账户可用模型..."
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
@@ -112,59 +142,106 @@ public final class AIModelManager: ObservableObject {
         }
         let session = URLSession(configuration: config)
 
-        // 尝试拉取 /v1/models 接口
-        guard let url = URL(string: "https://api.openai.com/v1/models") else {
-            isFetchingModels = false
-            return
+        // 提取 chatgpt-account-id
+        var accountID: String? = nil
+        let segments = token.components(separatedBy: ".")
+        if segments.count > 1 {
+            var b64 = segments[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            while b64.count % 4 != 0 { b64.append("=") }
+            if let d = Data(base64Encoded: b64),
+               let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let authClaim = json["https://api.openai.com/auth"] as? [String: Any] {
+                accountID = authClaim["chatgpt_account_id"] as? String
+            }
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        var candidateURLs: [URL] = []
+        if token.hasPrefix("sk-") {
+            if let u = URL(string: "https://api.openai.com/v1/models") { candidateURLs.append(u) }
+        } else {
+            // ChatGPT OAuth / 订阅接口
+            if let u1 = URL(string: "https://chatgpt.com/backend-api/models?history_and_training_disabled=false") { candidateURLs.append(u1) }
+            if let u2 = URL(string: "https://chatgpt.com/backend-api/models") { candidateURLs.append(u2) }
+            if let u3 = URL(string: "https://api.openai.com/v1/models") { candidateURLs.append(u3) }
+        }
 
-        do {
-            let (data, response) = try await session.data(for: request)
-            if let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let list = json["data"] as? [[String: Any]] {
+        var fetchedIDs: [String] = []
 
-                var fetchedIDs: [String] = []
-                for item in list {
-                    if let id = item["id"] as? String {
-                        // 过滤出适合文本与字幕翻译的 GPT/o1/o3/codex 系列模型
-                        let lower = id.lowercased()
-                        if lower.contains("gpt-4") || lower.contains("gpt-5") || lower.contains("codex") || lower.contains("o3-mini") || lower.contains("o1") {
-                            if !lower.contains("vision") && !lower.contains("audio") && !lower.contains("realtime") && !lower.contains("embedding") {
-                                fetchedIDs.append(id)
-                            }
+        for url in candidateURLs {
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let accountID = accountID {
+                request.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
+            }
+
+            if let (data, response) = try? await session.data(for: request),
+               let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+
+                // 处理 {"data": [{"id": "..."}]}
+                if let list = json["data"] as? [[String: Any]] {
+                    for item in list {
+                        if let id = item["id"] as? String {
+                            fetchedIDs.append(id)
+                        }
+                    }
+                }
+                // 处理 {"models": [{"slug": "...", "title": "..."}]}
+                if let models = json["models"] as? [[String: Any]] {
+                    for item in models {
+                        if let slug = item["slug"] as? String {
+                            fetchedIDs.append(slug)
+                        } else if let id = item["id"] as? String {
+                            fetchedIDs.append(id)
+                        }
+                    }
+                }
+                // 处理 categories
+                if let cats = json["categories"] as? [[String: Any]] {
+                    for cat in cats {
+                        if let defModel = cat["default_model"] as? String {
+                            fetchedIDs.append(defModel)
                         }
                     }
                 }
 
                 if !fetchedIDs.isEmpty {
-                    // 合并去重
-                    var merged: [AIModelInfo] = Self.defaultModels
-                    for fId in fetchedIDs {
-                        if !merged.contains(where: { $0.id == fId }) {
-                            merged.append(
-                                AIModelInfo(
-                                    id: fId,
-                                    displayName: fId,
-                                    description: "订阅账户动态发现可用模型",
-                                    badge: "订阅可用"
-                                )
-                            )
-                        }
-                    }
-                    self.availableModels = merged
-                    self.fetchMessage = "已同步最新可用模型 (\(merged.count) 个)"
-                } else {
-                    self.fetchMessage = "已加载推荐模型列表"
+                    break
                 }
-            } else {
-                self.fetchMessage = "已加载推荐模型列表"
             }
-        } catch {
-            self.fetchMessage = "已加载推荐模型列表"
+        }
+
+        // 过滤与格式化模型列表
+        var validIDs: [String] = []
+        for id in fetchedIDs {
+            let lower = id.lowercased()
+            if lower.contains("gpt-6") || lower.contains("gpt-5") || lower.contains("sol") || lower.contains("astra") || lower.contains("terra") || lower.contains("luna") || lower.contains("gpt-4") || lower.contains("o3") || lower.contains("o1") || lower.contains("codex") {
+                if !lower.contains("embedding") && !lower.contains("tts") && !lower.contains("moderation") {
+                    if !validIDs.contains(id) {
+                        validIDs.append(id)
+                    }
+                }
+            }
+        }
+
+        if !validIDs.isEmpty {
+            var merged = Self.defaultModels
+            for vId in validIDs {
+                if !merged.contains(where: { $0.id.lowercased() == vId.lowercased() }) {
+                    merged.append(
+                        AIModelInfo(
+                            id: vId,
+                            displayName: vId,
+                            description: "账户云端发现可用模型",
+                            badge: "订阅可用"
+                        )
+                    )
+                }
+            }
+            self.availableModels = merged
+            self.fetchMessage = "已同步云端可用模型 (\(merged.count) 个)"
+        } else {
+            self.fetchMessage = "已加载推荐模型列表 (GPT-6 / GPT-5.6 系列)"
         }
 
         isFetchingModels = false

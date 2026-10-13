@@ -9,10 +9,13 @@ public struct AISubtitleSettingsSheet: View {
     @State private var apiKey: String = ""
     @State private var proxyHost: String = ""
     @State private var proxyPort: String = ""
-    @State private var selectedSourceLanguage: String = "自动检测"
+    @State private var selectedSourceLanguage: String = "日语 (日本語 - 动漫/日剧)"
     @State private var selectedTargetLanguage: String = "中文 (简体)"
     @State private var isLoggingIn: Bool = false
     @State private var loginMessage: String? = nil
+    @State private var communityMatchStatus: String = ""
+    @State private var showCustomModelSheet: Bool = false
+    @State private var customModelText: String = ""
 
     public init(viewModel: PlayerViewModel) {
         self.viewModel = viewModel
@@ -47,6 +50,18 @@ public struct AISubtitleSettingsSheet: View {
                     }
                     .foregroundColor(.white.opacity(0.8))
                 }
+            }
+            .alert("手动输入大模型名称", isPresented: $showCustomModelSheet) {
+                TextField("如: gpt-6.1-sol, gpt-6-astra, gpt-5.6-terra", text: $customModelText)
+                Button("确定切换") {
+                    let trimmed = customModelText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        modelManager.selectModel(trimmed)
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("输入您账户可用的模型 ID（如 GPT-6.1 Sol、GPT-6 Astra、GPT-6 Sol、GPT-6 Luna、GPT-5.6 Sol、GPT-5.6 Terra 等），设定后将直接调用该模型执行影视字幕翻译。")
             }
             .onAppear {
                 self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
@@ -216,6 +231,15 @@ public struct AISubtitleSettingsSheet: View {
                         }
                     }
                 }
+
+                Divider()
+
+                Button(action: {
+                    customModelText = modelManager.selectedModelID
+                    showCustomModelSheet = true
+                }) {
+                    Label("手动输入其它可用模型...", systemImage: "pencil")
+                }
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -266,14 +290,14 @@ public struct AISubtitleSettingsSheet: View {
         )
     }
 
-    // MARK: - 3. 视频字幕离线预生成
+    // MARK: - 3. 视频字幕获取（社区精校匹配 + AI 离线生成）
     private var offlineGenerationSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("视频字幕离线预生成")
+            Text("字幕获取与智能生成")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 区别于卡顿的边播边显示，点击下方按钮将提前抽取完整音轨，借助大模型能力智能生成完整双语时间轴字幕并永久保存在本地。生成后观影即开即显，零等待、零卡顿、无需实时联网！")
+            Text("💡 支持【社区字幕组精校库】秒级免额度匹配，以及借助【GPT-6 / GPT-5.6】大模型离线提取完整音轨并生成动漫级双语对齐字幕。生成后永久缓存在本地，观影即开即显！")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -285,11 +309,11 @@ public struct AISubtitleSettingsSheet: View {
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.45))
                     Menu(selectedSourceLanguage) {
-                        Button("自动检测") { selectedSourceLanguage = "自动检测" }
-                        Button("英语 (English)") { selectedSourceLanguage = "英语 (English)" }
-                        Button("日语 (日本語)") { selectedSourceLanguage = "日语 (日本語)" }
-                        Button("中文 (普通话)") { selectedSourceLanguage = "中文 (普通话)" }
+                        Button("日语 (日本語 - 动漫/日剧)") { selectedSourceLanguage = "日语 (日本語 - 动漫/日剧)" }
+                        Button("英语 (English - 欧美影视)") { selectedSourceLanguage = "英语 (English - 欧美影视)" }
+                        Button("中文 (普通话/粤语)") { selectedSourceLanguage = "中文 (普通话/粤语)" }
                         Button("韩语 (한국어)") { selectedSourceLanguage = "韩语 (한국어)" }
+                        Button("自动智能检测") { selectedSourceLanguage = "自动智能检测" }
                     }
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(AppSettings.shared.themeColor.color)
@@ -315,44 +339,65 @@ public struct AISubtitleSettingsSheet: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
             }
 
-            // 预生成按钮
-            Button(action: {
-                viewModel.generateAISubtitles(
-                    sourceLanguage: selectedSourceLanguage,
-                    targetLanguage: selectedTargetLanguage
-                )
-            }) {
-                HStack(spacing: 8) {
-                    if viewModel.isGeneratingSubtitles {
-                        ProgressView()
-                            .tint(.white)
-                        Text(viewModel.generatingSubtitleStatusText.isEmpty ? "正在离线处理音频并生成字幕..." : viewModel.generatingSubtitleStatusText)
-                            .font(.system(size: 14, weight: .semibold))
-                            .lineLimit(1)
-                    } else if !viewModel.subtitles.isEmpty {
-                        Image(systemName: "checkmark.seal.fill")
-                            .foregroundColor(.green)
-                        Text("✅ 离线字幕已就绪 (共 \(viewModel.subtitles.count) 句) · 点击重新生成")
-                            .font(.system(size: 14, weight: .semibold))
-                    } else {
-                        Image(systemName: "sparkles")
-                        Text("一键为该视频生成离线 AI 双语字幕")
-                            .font(.system(size: 14, weight: .semibold))
+            VStack(spacing: 10) {
+                // 社区精校字幕 (射手网 / 字幕组) 一键匹配
+                Button(action: {
+                    Task {
+                        await fetchCommunitySubtitles()
                     }
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "globe.asia.australia.fill")
+                        Text(communityMatchStatus.isEmpty ? "检索社区字幕组精校字幕 (射手网免额度)" : communityMatchStatus)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.purple.opacity(0.45)))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.purple.opacity(0.8), lineWidth: 1))
                 }
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(viewModel.subtitles.isEmpty ? AppSettings.shared.themeColor.color : Color.white.opacity(0.12))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(!viewModel.subtitles.isEmpty ? Color.green.opacity(0.5) : Color.clear, lineWidth: 1)
-                )
+
+                // AI 大模型智能生成按钮
+                Button(action: {
+                    viewModel.generateAISubtitles(
+                        sourceLanguage: selectedSourceLanguage,
+                        targetLanguage: selectedTargetLanguage
+                    )
+                }) {
+                    HStack(spacing: 8) {
+                        if viewModel.isGeneratingSubtitles {
+                            ProgressView()
+                                .tint(.white)
+                            Text(viewModel.generatingSubtitleStatusText.isEmpty ? "正在离线处理音频并生成字幕..." : viewModel.generatingSubtitleStatusText)
+                                .font(.system(size: 14, weight: .semibold))
+                                .lineLimit(1)
+                        } else if !viewModel.subtitles.isEmpty {
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundColor(.green)
+                            Text("✅ 离线字幕已就绪 (共 \(viewModel.subtitles.count) 句) · 点击重新生成")
+                                .font(.system(size: 14, weight: .semibold))
+                        } else {
+                            Image(systemName: "sparkles")
+                            Text("一键为该视频生成离线 AI 双语字幕")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(viewModel.subtitles.isEmpty ? AppSettings.shared.themeColor.color : Color.white.opacity(0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(!viewModel.subtitles.isEmpty ? Color.green.opacity(0.5) : Color.clear, lineWidth: 1)
+                    )
+                }
+                .disabled(viewModel.isGeneratingSubtitles)
             }
-            .disabled(viewModel.isGeneratingSubtitles)
 
             if let errorMsg = viewModel.subtitleErrorMessage {
                 HStack(spacing: 6) {
@@ -479,5 +524,35 @@ public struct AISubtitleSettingsSheet: View {
             }
             isLoggingIn = false
         }
+    }
+
+    private func fetchCommunitySubtitles() async {
+        guard let url = viewModel.currentVideoURL else {
+            communityMatchStatus = "未找到视频源"
+            return
+        }
+        communityMatchStatus = "正在检索社区精校字幕..."
+        do {
+            let results = try await ShooterSubtitleService.shared.fetchCommunitySubtitles(videoURL: url)
+            if let best = results.first {
+                communityMatchStatus = "找到：\(best.desc)，正在秒级装载..."
+                let lines = try await ShooterSubtitleService.shared.downloadAndParseSubtitle(from: best.downloadURL)
+                if !lines.isEmpty {
+                    viewModel.subtitles = lines
+                    viewModel.isAISubtitleEnabled = true
+                    let targetSRT = url.deletingPathExtension().appendingPathExtension("srt")
+                    try? SRTParser.generateSRT(from: lines).write(to: targetSRT, atomically: true, encoding: .utf8)
+                    communityMatchStatus = "✅ 成功匹配社区字幕组精校字幕 (共 \(lines.count) 句)"
+                } else {
+                    communityMatchStatus = "未解析到台词，建议使用下方 AI 生成"
+                }
+            } else {
+                communityMatchStatus = "社区库未收录该视频，请使用下方 AI 生成"
+            }
+        } catch {
+            communityMatchStatus = "检索失败，请使用下方 AI 生成"
+        }
+        try? await Task.sleep(nanoseconds: 3_500_000_000)
+        communityMatchStatus = ""
     }
 }
