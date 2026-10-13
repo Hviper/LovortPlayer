@@ -44,24 +44,24 @@ jobs:
             -scheme LovortPlayer \
             -destination "generic/platform=iOS" \
             -configuration Release \
+            -derivedDataPath build/DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            SWIFT_COMPILATION_MODE=wholemodule \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             DEAD_CODE_STRIPPING=YES \
             STRIP_INSTALLED_PRODUCT=YES \
             STRIP_SWIFT_SYMBOLS=YES \
             DEPLOYMENT_POSTPROCESSING=YES \
-            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
-            CONFIGURATION_BUILD_DIR=build/Release-iphoneos
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym
 
       - name: Package to IPA
         run: |
           mkdir -p Payload
-          cp -r build/Release-iphoneos/LovortPlayer.app Payload/
+          cp -r build/DerivedData/Build/Products/Release-iphoneos/LovortPlayer.app Payload/
           zip -r LovortPlayer.ipa Payload
           # 打包 dSYM 供崩溃符号化
-          zip -r LovortPlayer.dSYM.zip build/Release-iphoneos/LovortPlayer.app.dSYM 2>/dev/null || true
+          zip -r LovortPlayer.dSYM.zip build/DerivedData/Build/Products/Release-iphoneos/LovortPlayer.app.dSYM 2>/dev/null || true
           echo "IPA size: $(du -sh LovortPlayer.ipa | cut -f1)"
           echo "IPA packaging completed successfully."
 
