@@ -88,30 +88,74 @@ public struct VideoCardView: View {
                     }
                 }
 
-                // 标题与信息元数据
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(video.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
+                // 标题与信息元数据（带快捷操作菜单）
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(video.title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
 
-                    HStack(spacing: 8) {
-                        Text(formatFileSize(video.fileSize))
-                            .font(.system(size: 12))
-                            .foregroundColor(.white.opacity(0.5))
+                        HStack(spacing: 8) {
+                            Text(formatFileSize(video.fileSize))
+                                .font(.system(size: 12))
+                                .foregroundColor(.white.opacity(0.5))
 
-                        Text("•")
-                            .foregroundColor(.white.opacity(0.3))
+                            Text("•")
+                                .foregroundColor(.white.opacity(0.3))
 
-                        if video.lastPlayedPosition > 0 {
-                            Text("上次看到 \(formatDuration(video.lastPlayedPosition))")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.cyan.opacity(0.9))
-                        } else {
-                            Text(video.isHidden ? "私密文件" : "AI 字幕就绪")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .white.opacity(0.4))
+                            if video.lastPlayedPosition > 0 {
+                                Text("上次看到 \(formatDuration(video.lastPlayedPosition))")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.cyan.opacity(0.9))
+                            } else {
+                                Text(video.isHidden ? "私密文件" : "AI 字幕就绪")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .white.opacity(0.4))
+                            }
                         }
+                    }
+
+                    Spacer()
+
+                    // 快捷操作菜单 ("...")
+                    Menu {
+                        Button {
+                            VideoExportManager.shared.shareVideo(url: video.fileURL)
+                        } label: {
+                            Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+                        }
+
+                        Button {
+                            saveToPhotoLibrary()
+                        } label: {
+                            Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+                        }
+
+                        Button {
+                            VideoExportManager.shared.saveToFiles(url: video.fileURL)
+                        } label: {
+                            Label("存储到“文件”", systemImage: "folder.badge.plus")
+                        }
+
+                        Divider()
+
+                        if let onToggleHide = onToggleHide {
+                            Button(action: onToggleHide) {
+                                Label(video.isHidden ? "移出私密文件夹" : "移入私密文件夹", systemImage: video.isHidden ? "lock.open" : "lock.fill")
+                            }
+                        }
+                        if let onDelete = onDelete {
+                            Button(role: .destructive, action: onDelete) {
+                                Label("删除视频", systemImage: "trash")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white.opacity(0.6))
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Color.white.opacity(0.08)))
                     }
                 }
                 .padding(.horizontal, 4)
@@ -128,6 +172,26 @@ public struct VideoCardView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button {
+                VideoExportManager.shared.shareVideo(url: video.fileURL)
+            } label: {
+                Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+            }
+
+            Button {
+                saveToPhotoLibrary()
+            } label: {
+                Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+            }
+
+            Button {
+                VideoExportManager.shared.saveToFiles(url: video.fileURL)
+            } label: {
+                Label("存储到“文件”", systemImage: "folder.badge.plus")
+            }
+
+            Divider()
+
             if let onToggleHide = onToggleHide {
                 Button(action: onToggleHide) {
                     Label(video.isHidden ? "移出私密文件夹" : "移入私密文件夹", systemImage: video.isHidden ? "lock.open" : "lock.fill")
@@ -141,6 +205,17 @@ public struct VideoCardView: View {
         }
         .task {
             await generateThumbnail()
+        }
+    }
+
+    private func saveToPhotoLibrary() {
+        Task {
+            do {
+                try await VideoExportManager.shared.saveToPhotoLibrary(videoURL: video.fileURL)
+                MediaLibraryManager.shared.showNotification(message: "已成功保存到系统相册：\(video.title)")
+            } catch {
+                MediaLibraryManager.shared.showNotification(message: error.localizedDescription, isError: true)
+            }
         }
     }
 

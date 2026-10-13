@@ -60,11 +60,7 @@ public final class LosslessClipManager: @unchecked Sendable {
 
         #if os(iOS)
         // 尝试自动保存一份到系统相册
-        if PHPhotoLibrary.authorizationStatus(for: .addOnly) == .authorized {
-            try? await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
-            }
-        }
+        try? await VideoExportManager.shared.saveToPhotoLibrary(videoURL: outputURL)
         #endif
     }
 }

@@ -207,6 +207,35 @@ public struct FullscreenVideoPlayerView: View {
                 .frame(height: 38)
                 .background(Capsule().fill(Color.white.opacity(0.15)))
             }
+
+            // 分享与导出菜单 (系统分享/保存相册/存储文件)
+            Menu {
+                Button {
+                    VideoExportManager.shared.shareVideo(url: videoURL)
+                } label: {
+                    Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+                }
+
+                Button {
+                    Task {
+                        await handleSaveToPhotos()
+                    }
+                } label: {
+                    Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+                }
+
+                Button {
+                    VideoExportManager.shared.saveToFiles(url: videoURL)
+                } label: {
+                    Label("存储到“文件”", systemImage: "folder.badge.plus")
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 15))
+                    .foregroundColor(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(Color.white.opacity(0.15)))
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
@@ -387,6 +416,16 @@ public struct FullscreenVideoPlayerView: View {
                     self.gestureIndicatorIcon = nil
                 }
             }
+        }
+    }
+
+    private func handleSaveToPhotos() async {
+        showGestureHUD(icon: "arrow.down.circle", text: "正在保存...", autoDismiss: false)
+        do {
+            try await VideoExportManager.shared.saveToPhotoLibrary(videoURL: videoURL)
+            showGestureHUD(icon: "checkmark.circle.fill", text: "已保存到系统相册", autoDismiss: true)
+        } catch {
+            showGestureHUD(icon: "exclamationmark.triangle.fill", text: error.localizedDescription, autoDismiss: true)
         }
     }
 

@@ -54,25 +54,26 @@ public struct MediaLibraryHomeView: View {
                     // 自定义 Lovort 导航条
                     customHeaderBar
 
-                    // 导入完成提示条
+                    // 操作反馈提示条（导入、相册保存、存储到文件等）
                     if let successMsg = libraryManager.importSuccessMessage {
+                        let isError = libraryManager.isSuccessMessageError
                         HStack(spacing: 8) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
+                            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                                .foregroundColor(isError ? .orange : .green)
                             Text(successMsg)
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(.white)
-                                .lineLimit(1)
+                                .lineLimit(2)
                             Spacer()
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.green.opacity(0.18))
+                                .fill(isError ? Color.orange.opacity(0.18) : Color.green.opacity(0.18))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.green.opacity(0.4), lineWidth: 1)
+                                        .stroke(isError ? Color.orange.opacity(0.4) : Color.green.opacity(0.4), lineWidth: 1)
                                 )
                         )
                         .padding(.horizontal, 20)

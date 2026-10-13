@@ -15,6 +15,19 @@ public final class MediaLibraryManager: ObservableObject {
     @Published public var isImporting: Bool = false
     @Published public var importStatusText: String = ""
     @Published public var importSuccessMessage: String? = nil
+    @Published public var isSuccessMessageError: Bool = false
+
+    public func showNotification(message: String, isError: Bool = false) {
+        importSuccessMessage = message
+        isSuccessMessageError = isError
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            if self.importSuccessMessage == message {
+                self.importSuccessMessage = nil
+                self.isSuccessMessageError = false
+            }
+        }
+    }
 
     private let fileManager = FileManager.default
 
