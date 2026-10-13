@@ -53,6 +53,12 @@ public final class PlayerViewModel: ObservableObject {
         self.currentVideoURL = url
         resetControlsTimeout()
 
+        // 应用设置中的默认音量
+        if AppSettings.shared.useDefaultVolume {
+            self.volume = AppSettings.shared.defaultVolume
+            SystemVolumeController.shared.setVolume(AppSettings.shared.defaultVolume)
+        }
+
         // 尝试自动载入字幕
         if let srt = AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: url) {
             self.subtitles = srt

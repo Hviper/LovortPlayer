@@ -6,6 +6,7 @@ import PhotosUI
 
 public struct MediaLibraryHomeView: View {
     @StateObject private var libraryManager = MediaLibraryManager.shared
+    @ObservedObject private var settings = AppSettings.shared
     @State private var selectedVideo: VideoItem?
     @State private var showLANUpload: Bool = false
     @State private var showVaultUnlocked: Bool = false
@@ -15,6 +16,7 @@ public struct MediaLibraryHomeView: View {
     @State private var showPinDialog: Bool = false
     @State private var pinInput: String = ""
     @State private var isDecoySpace: Bool = false
+    @State private var showSettings: Bool = false
 
     #if os(iOS)
     @State private var isPhotosPickerPresented: Bool = false
@@ -193,6 +195,9 @@ public struct MediaLibraryHomeView: View {
             .sheet(isPresented: $showLANUpload) {
                 LANUploadSheet()
             }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+            }
             .fileImporter(
                 isPresented: $isFileImporterPresented,
                 allowedContentTypes: [.movie, .video],
@@ -238,12 +243,12 @@ public struct MediaLibraryHomeView: View {
                 HStack(spacing: 6) {
                     Text(filterTab == 2 ? (isDecoySpace ? "访客空间" : "私密保险箱") : "媒体库")
                         .font(.system(size: 26, weight: .bold))
-                        .foregroundColor(filterTab == 2 || showVaultUnlocked ? .cyan : .white)
+                        .foregroundColor(filterTab == 2 || showVaultUnlocked ? settings.themeColor.color : .white)
 
                     if showVaultUnlocked {
                         Image(systemName: "lock.open.fill")
                             .font(.system(size: 14))
-                            .foregroundColor(.cyan)
+                            .foregroundColor(settings.themeColor.color)
                     }
                 }
                 Text(showVaultUnlocked ? "AES-256 空间已解锁 (\(filteredVideos.count))" : "本地视频 (\(filteredVideos.count))")
@@ -287,6 +292,15 @@ public struct MediaLibraryHomeView: View {
                         .fill(Color.white.opacity(0.1))
                 )
             }
+
+            // 设置按钮
+            Button(action: { showSettings = true }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.1)))
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
@@ -298,7 +312,10 @@ public struct MediaLibraryHomeView: View {
         HStack(spacing: 10) {
             tabButton(title: "全部", index: 0)
             tabButton(title: "精彩剪辑", index: 1)
-            tabButton(title: "私密保险箱 🔒", index: 2)
+            // 私密文件夹 Tab：受设置控制是否显示
+            if settings.showVaultInTabBar {
+                tabButton(title: "私密文件夹 🔒", index: 2)
+            }
             Spacer()
         }
         .padding(.horizontal, 20)
@@ -308,7 +325,7 @@ public struct MediaLibraryHomeView: View {
     private func tabButton(title: String, index: Int) -> some View {
         Button(action: {
             if index == 2 && !showVaultUnlocked {
-                // 点击私密保险箱时触发 Face ID 验证或弹窗
+                // 点击私密保险箱时根据设置决定是否触发 Face ID
                 triggerVaultBiometrics()
             } else {
                 withAnimation {
@@ -335,11 +352,11 @@ public struct MediaLibraryHomeView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.white.opacity(0.2))
 
-            Text(filterTab == 2 ? "保险箱为空" : "暂无视频文件")
+            Text(filterTab == 2 ? "私密文件夹为空" : "暂无视频文件")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white.opacity(0.7))
 
-            Text(filterTab == 2 ? "长按列表视频可将视频移入保险箱" : "可以通过右上角 [+] 导入视频，或点击 [无线传片] 电脑免线快传")
+            Text(filterTab == 2 ? "长按列表视频可将视频移入私密文件夹" : "可以通过右上角 [+] 导入视频，或点击 [无线传片] 电脑免线快传")
                 .font(.system(size: 13))
                 .foregroundColor(.white.opacity(0.4))
                 .multilineTextAlignment(.center)
@@ -350,17 +367,23 @@ public struct MediaLibraryHomeView: View {
 
     private func triggerVaultBiometrics() {
         Task {
-            isAuthenticatingVault = true
-            let result = await VaultManager.shared.authenticateWithBiometrics()
-            isAuthenticatingVault = false
-            if result.success {
-                withAnimation {
-                    showVaultUnlocked = true
-                    isDecoySpace = false
-                    filterTab = 2
+            // 根据设置决定是否需要 Face ID / Touch ID 验证
+            if settings.vaultRequiresBiometrics {
+                isAuthenticatingVault = true
+                let result = await VaultManager.shared.authenticateWithBiometrics()
+                isAuthenticatingVault = false
+                if result.success {
+                    withAnimation {
+                        showVaultUnlocked = true
+                        isDecoySpace = false
+                        filterTab = 2
+                    }
+                } else {
+                    // 生物识别失败或不可用时，弹密码输入框（支持真/假诱导密码）
+                    showPinDialog = true
                 }
             } else {
-                // 生物识别失败或不可用时，弹密码输入框（支持真/假诱导密码）
+                // Face ID 已在设置中关闭，直接弹密码输入框
                 showPinDialog = true
             }
         }
