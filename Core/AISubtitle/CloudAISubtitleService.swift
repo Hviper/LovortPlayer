@@ -98,6 +98,35 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         }
     }
 
+    public func polish(
+        lines: [SubtitleLine],
+        targetLanguage: String,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> [SubtitleLine] {
+        guard apiKey.hasPrefix("sk-") else { throw serviceError("GPT 语境精修需要 OpenAI Platform API Key") }
+        guard lines.allSatisfy({ !($0.translatedText ?? "").isEmpty }) else {
+            throw serviceError("GPT 语境精修需要先生成完整译文")
+        }
+        let batches = makeTranslationBatches(lines)
+        var polishedByID: [UUID: String] = [:]
+        for (batchIndex, batch) in batches.enumerated() {
+            try Task.checkCancellation()
+            onProgress?("正在使用 GPT 统一人物称谓与影视语气 \(batchIndex + 1)/\(batches.count)...")
+            let values = try await requestPolishBatch(lines: batch, targetLanguage: targetLanguage)
+            guard values.count == batch.count else { throw serviceError("GPT 精修结果数量不完整") }
+            for (index, line) in batch.enumerated() { polishedByID[line.id] = values[index] }
+        }
+        return lines.map { line in
+            SubtitleLine(
+                id: line.id,
+                startTime: line.startTime,
+                endTime: line.endTime,
+                originalText: line.originalText,
+                translatedText: polishedByID[line.id] ?? line.translatedText
+            )
+        }
+    }
+
     private func makeTranslationBatches(_ lines: [SubtitleLine]) -> [[SubtitleLine]] {
         var result: [[SubtitleLine]] = []
         var current: [SubtitleLine] = []
@@ -129,7 +158,7 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         """
 
         let activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
-        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-4o-mini"])
+        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
         var lastError: Error?
         for model in candidateModels {
             do {
@@ -142,6 +171,38 @@ public final class CloudAISubtitleService: @unchecked Sendable {
             }
         }
         throw lastError ?? serviceError("字幕翻译请求失败")
+    }
+
+    private func requestPolishBatch(lines: [SubtitleLine], targetLanguage: String) async throws -> [String] {
+        let sourceObjects = lines.enumerated().map { index, line in
+            [
+                "index": index,
+                "original": line.originalText,
+                "draft": line.translatedText ?? ""
+            ] as [String: Any]
+        }
+        let sourceData = try JSONSerialization.data(withJSONObject: sourceObjects)
+        let sourceJSON = String(decoding: sourceData, as: UTF8.self)
+        let prompt = """
+        你是影视字幕总监。结合整批上下文，把下列“\(targetLanguage)”初译统一人名、称谓、敬语、俚语和角色语气。
+        保持简洁自然，适合屏幕阅读；不得改变事实，不得增删、合并或拆分条目。
+        只返回严格 JSON 数组，每项格式为 {"index": 原索引, "translation": "精修译文"}，必须覆盖 0 到 \(lines.count - 1)。
+        输入：\(sourceJSON)
+        """
+        let activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
+        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
+        var lastError: Error?
+        for model in candidateModels {
+            do {
+                let content = try await requestPlatformResponse(prompt: prompt, model: model)
+                return try Self.decodeTranslations(from: content, expectedCount: lines.count)
+            } catch {
+                lastError = error
+                let status = (error as NSError).code
+                if status == 401 || status == 403 || status == 429 || status >= 500 { break }
+            }
+        }
+        throw lastError ?? serviceError("GPT 字幕精修失败")
     }
 
     static func decodeTranslations(from content: String, expectedCount: Int) throws -> [String] {
@@ -180,10 +241,10 @@ public final class CloudAISubtitleService: @unchecked Sendable {
     }
 
     private func requestTranslationText(prompt: String, model: String) async throws -> String {
-        if apiKey.hasPrefix("sk-") {
-            return try await requestPlatformResponse(prompt: prompt, model: model)
+        guard apiKey.hasPrefix("sk-") else {
+            throw serviceError("OpenAI 请求需要 Platform API Key；ChatGPT 订阅令牌不能用于公开 API")
         }
-        return try await requestSubscriptionResponse(prompt: prompt, model: model)
+        return try await requestPlatformResponse(prompt: prompt, model: model)
     }
 
     private func requestPlatformResponse(prompt: String, model: String) async throws -> String {
@@ -202,25 +263,6 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         return try extractResponseText(from: data)
     }
 
-    private func requestSubscriptionResponse(prompt: String, model: String) async throws -> String {
-        guard let endpoint = URL(string: "https://api.openai.com/v1/responses") else {
-            throw serviceError("ChatGPT 翻译地址无效")
-        }
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "instructions": "You are a professional audiovisual subtitle translator. Return only the requested JSON.",
-            "input": [["role": "user", "content": prompt]],
-            "store": false,
-            "stream": true
-        ])
-        let (data, response) = try await createProxyAwareSession().data(for: request)
-        try validate(response: response, data: data)
-        return try Self.extractStreamingResponseText(from: data)
-    }
 
     static func extractStreamingResponseText(from data: Data) throws -> String {
         let payload = String(decoding: data, as: UTF8.self)

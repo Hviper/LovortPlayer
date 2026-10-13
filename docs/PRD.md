@@ -1,15 +1,15 @@
 # 📱 iPhone 视频播放器 — 产品需求文档（PRD）
 
-> 版本 v0.2 · 2026-10-12 · 已确认关键决策
+> 版本 v0.3 · 2026-10-14 · 实现状态同步
 
 ## 已确认决策
 
 | 问题 | 决策 |
 |---|---|
 | 后端 | ✅ 纯本地，无服务器 |
-| AI 字幕 | ✅ 可选开启，需配置 API Key 或 OAuth 登录 |
-| OAuth 目的 | ✅ 解锁 AI 配额（ChatGPT / Antigravity） |
-| iOS 版本 | ✅ iOS 25+ |
+| AI 字幕 | ✅ WhisperKit 原文转写可离线；联网翻译按服务商单独配置 |
+| GPT 定位 | ✅ 可选语境翻译/精修；不承担基础播放与离线转写 |
+| iOS 版本 | ✅ iOS 18+ |
 | 发布方式 | ✅ 个人本地使用，无需上架 App Store |
 | Lovort 参考 | ✅ UI 风格 + 交互逻辑 均参考 |
 
@@ -28,7 +28,7 @@
 | 功能点 | 描述 |
 |---|---|
 | 多格式支持 | MP4 / MKV / AVI / MOV 等主流格式 |
-| 硬件解码 | 使用 VideoToolbox 硬解，低功耗高性能 |
+| 混合解码 | AVFoundation/VideoToolbox 原生优先；MKV/AVI/WebM 等自动回退 KSPlayer + FFmpeg |
 | 手势控制 | 左右滑动进度 / 上下滑动音量亮度 |
 | 后台播放 | 锁屏/后台继续播放，支持 AirPlay |
 | 播放历史 | 记录上次播放位置，下次自动续播 |
@@ -73,7 +73,7 @@
 |---|---|
 | WebDAV / HTTP 服务器 | App 内启动本地 HTTP Server，PC 浏览器直接拖拽上传 |
 | 二维码快捷连接 | 显示本机 IP 二维码，手机扫码直接跳转上传页 |
-| 多文件并发上传 | 支持断点续传 |
+| 大文件上传 | 按 Content-Length 流式落盘，校验空间、扩展名和一次性访问口令 |
 | Bonjour 发现 | 局域网内自动广播服务，AirDrop 级体验 |
 | 进度显示 | 实时显示每个文件传输速度和进度 |
 
@@ -104,45 +104,20 @@
     ↓
 时间戳对齐 → SRT/ASS 生成
     ↓
-翻译（本地 Apple Translation / OpenAI GPT API）
+翻译（Apple Translation / DeepL / Google / Azure / OpenAI GPT API）
     ↓
 字幕渲染叠加（AVPlayerLayer + CATextLayer）
 ```
 
 ---
 
-### 2.6 🔑 身份认证（Auth）
+### 2.6 🔑 云端凭据
 
-> 认证仅用于**解锁 AI 字幕功能**，本地播放/剪辑/传输无需登录。
+> 本地播放、局域网上传、Apple 设备端翻译和 WhisperKit 转写均不需要账号。
 
-#### OAuth 登录（使用第三方 AI 配额）
-
-| 提供商 | 用途 |
-|---|---|
-| **ChatGPT（OpenAI）** | 使用用户自己的 OpenAI 账户额度 |
-| **Antigravity** | 使用 Antigravity AI 配额 |
-
-- 使用 OAuth 2.0 + PKCE 流程（ASWebAuthenticationSession）
-- Token 本地加密存储（Keychain），无服务器转发
-
-#### API Key 模式（高级用户）
-
-- 手动输入 OpenAI API Key / 自定义 Base URL
-- 支持兼容接口：DeepSeek、Qwen、本地 Ollama 等
-- Key 存储在 iOS Keychain，绝不明文落盘
-
-#### AI 功能解锁逻辑
-
-```
-用户首次使用 AI 字幕
-    ↓
-弹出引导页 → 选择：
-    ├── OAuth 登录 ChatGPT / Antigravity
-    └── 手动输入 API Key + Base URL
-          ↓
-验证成功 → 解锁 AI 字幕功能
-AI 字幕开关在「设置」中可随时开启/关闭
-```
+- ChatGPT Plus/Pro 与 OpenAI Platform API 分别计费，ChatGPT 登录令牌不用于公开 API。
+- OpenAI、DeepL、Google、Azure 的 Key 分服务存放在 iOS Keychain。
+- GPT 的意义是上下文翻译与译后精修，而不是替代 Whisper 的语音识别。
 
 ---
 
@@ -163,7 +138,7 @@ AI 字幕开关在「设置」中可随时开启/关闭
 │  │                                               │   │
 │  │  音频提取 → WhisperKit(本地) / Whisper API    │   │
 │  │          → 时间戳对齐 → SRT 生成              │   │
-│  │          → 翻译（GPT / Apple Translation）   │   │
+│  │          → 多 Provider 翻译 → 可选 GPT 精修  │   │
 │  │          → 字幕叠加渲染                       │   │
 │  └───────────────────────────────────────────────┘   │
 │                                                      │
@@ -175,7 +150,7 @@ AI 字幕开关在「设置」中可随时开启/关闭
 └──────────────────────────────────────────────────────┘
               ↕（仅 AI 字幕功能需要网络）
 ┌──────────────────────────────────────────────────────┐
-│   ChatGPT API / Antigravity API / 自定义 Endpoint    │
+│   OpenAI / DeepL / Google / Azure 翻译 API           │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -185,13 +160,13 @@ AI 字幕开关在「设置」中可随时开启/关闭
 
 | 层 | 技术 | 说明 |
 |---|---|---|
-| UI 框架 | **SwiftUI** | iOS 25+ 全面拥抱 SwiftUI |
-| 播放引擎 | AVFoundation + AVKit | 原生硬解，低功耗 |
+| UI 框架 | **SwiftUI** | iOS 18+ |
+| 播放引擎 | AVFoundation + KSPlayer/FFmpeg | 原生低功耗，兼容格式自动回退 |
 | 视频剪辑 | **FFmpegKit** | 帧级 GOP 无损裁切 |
 | 局域网服务 | **GCDWebServer** / Swifter | 内嵌 HTTP + Bonjour |
 | AI 字幕（本地） | **WhisperKit** | on-device，离线可用 |
 | AI 字幕（云端） | OpenAI Whisper API | 速度快，需 API Key |
-| 翻译 | Apple Translation Framework | iOS 17+ 原生，离线 |
+| 翻译 | Apple Translation + DeepL/Google/Azure/OpenAI | 离线优先，可选云端 |
 | 文件加密 | **CryptoKit** AES-GCM | 苹果原生加密库 |
 | 认证 | **ASWebAuthenticationSession** | OAuth PKCE 流程 |
 | 安全存储 | **Keychain** | API Key / Token 存储 |
@@ -216,8 +191,8 @@ AI 字幕开关在「设置」中可随时开启/关闭
 ### Phase 2 — 进阶功能（4-6 周）
 - [x] 无损视频剪辑（FFmpegKit）
 - [x] AI 字幕生成（WhisperKit 本地 + API 云端）
-- [x] OAuth 登录（ChatGPT / Antigravity）
-- [x] API Key 配置与管理
+- [x] 多翻译 Provider 的 API Key 配置与 Keychain 管理
+- [x] 可选 GPT 影视语境精修
 
 ---
 

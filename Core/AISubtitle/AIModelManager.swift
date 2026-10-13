@@ -22,7 +22,7 @@ public final class AIModelManager: ObservableObject {
 
     private let storageKey = "LovortSelectedAIModelID"
 
-    /// 内置的前沿主流模型选项（全面覆盖 GPT-6 Sol/Astra/Luna 旗舰与 GPT-5.6 系列）
+    /// 官方 OpenAI Platform 文档中的通用文本模型；账户可用列表会在运行时刷新。
     public static let defaultModels: [AIModelInfo] = [
         AIModelInfo(
             id: "gpt-6.1-sol",
@@ -37,52 +37,10 @@ public final class AIModelManager: ObservableObject {
             badge: "全能旗舰"
         ),
         AIModelInfo(
-            id: "gpt-6-sol",
-            displayName: "GPT-6 Sol",
-            description: "GPT-6 均衡主力模型，影视字幕极速高精翻译",
-            badge: "均衡推荐"
-        ),
-        AIModelInfo(
             id: "gpt-6-luna",
             displayName: "GPT-6 Luna",
             description: "GPT-6 极速轻量模型，超低延迟处理长篇字幕",
             badge: "轻量极速"
-        ),
-        AIModelInfo(
-            id: "gpt-5.6-sol",
-            displayName: "GPT-5.6 Sol",
-            description: "GPT-5.6 均衡主力模型，长文本稳定性极佳",
-            badge: "高精稳定"
-        ),
-        AIModelInfo(
-            id: "gpt-5.6-terra",
-            displayName: "GPT-5.6 Terra",
-            description: "GPT-5.6 专业批处理模型，适合长篇连续剧字幕",
-            badge: "专业批量"
-        ),
-        AIModelInfo(
-            id: "gpt-5.6-luna",
-            displayName: "GPT-5.6 Luna",
-            description: "GPT-5.6 极速轻量模型，基础台词极速对齐",
-            badge: "轻量版"
-        ),
-        AIModelInfo(
-            id: "gpt-4o-mini",
-            displayName: "GPT-4o Mini",
-            description: "经典轻量模型，日常快速翻译",
-            badge: "经典"
-        ),
-        AIModelInfo(
-            id: "gpt-4o",
-            displayName: "GPT-4o",
-            description: "经典全能旗舰模型",
-            badge: "经典"
-        ),
-        AIModelInfo(
-            id: "gpt-5.1-codex-mini",
-            displayName: "Codex Mini (专线)",
-            description: "ChatGPT 订阅专线通道，长篇字幕格式对齐稳定",
-            badge: "专线"
         )
     ]
 
@@ -118,7 +76,7 @@ public final class AIModelManager: ObservableObject {
         self.selectedModelID = id
     }
 
-    /// 异步向 OpenAI / ChatGPT 获取当前订阅真实支持的模型列表
+    /// 使用 OpenAI Platform API Key 获取当前项目可用的模型列表。
     public func fetchAvailableModels(token: String) async {
         guard !token.isEmpty else { return }
 
@@ -142,7 +100,6 @@ public final class AIModelManager: ObservableObject {
         }
         let session = URLSession(configuration: config)
 
-        // OpenAI Platform Key 与 ChatGPT 计划 OAuth Token 都使用公开模型目录。
         let candidateURLs = [URL(string: "https://api.openai.com/v1/models")].compactMap { $0 }
 
         var fetchedIDs: [String] = []
@@ -209,7 +166,7 @@ public final class AIModelManager: ObservableObject {
                             id: vId,
                             displayName: vId,
                             description: "账户云端发现可用模型",
-                            badge: "订阅可用"
+                            badge: "API 可用"
                         )
                     )
                 }
@@ -217,7 +174,7 @@ public final class AIModelManager: ObservableObject {
             self.availableModels = merged
             self.fetchMessage = "已同步云端可用模型 (\(merged.count) 个)"
         } else {
-            self.fetchMessage = "已加载推荐模型列表 (GPT-6 / GPT-5.6 系列)"
+            self.fetchMessage = "已加载官方推荐模型列表"
         }
 
         isFetchingModels = false

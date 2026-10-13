@@ -1,10 +1,12 @@
 import SwiftUI
+import KSPlayer
 #if os(iOS)
 import UIKit
 #endif
 
 public struct FullscreenVideoPlayerView: View {
     @StateObject public var viewModel = PlayerViewModel()
+    @ObservedObject private var settings = AppSettings.shared
     public let videoURL: URL
     public let videoTitle: String
     public var onDismiss: () -> Void
@@ -17,6 +19,7 @@ public struct FullscreenVideoPlayerView: View {
     @State private var isLandscape: Bool = false
     @State private var hideHUDTask: Task<Void, Never>? = nil
     @State private var initialVolume: Float = 0.5
+    @State private var showSubtitleTimeline = false
 
     public init(videoURL: URL, videoTitle: String, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
@@ -31,8 +34,15 @@ public struct FullscreenVideoPlayerView: View {
 
             // 原生 AVPlayer 视频渲染层 或 libdav1d AV1 软解渲染层
             ZStack {
-                NativeVideoPlayerView(player: viewModel.player)
-                    .ignoresSafeArea()
+                if viewModel.isCompatibilityMode,
+                   let coordinator = viewModel.compatibilityCoordinator,
+                   let options = viewModel.compatibilityOptions {
+                    KSVideoPlayer(coordinator: coordinator, url: videoURL, options: options)
+                        .ignoresSafeArea()
+                } else {
+                    NativeVideoPlayerView(player: viewModel.player)
+                        .ignoresSafeArea()
+                }
 
                 if viewModel.isAV1SoftwareMode {
                     if let cgFrame = viewModel.currentSoftwareFrame {
@@ -83,6 +93,19 @@ public struct FullscreenVideoPlayerView: View {
             // AI 实时双语字幕图层 (确保置于控制层下方，不受控制栏显隐影响)
             AISubtitleOverlayView(subtitle: viewModel.currentSubtitle)
 
+            if let message = viewModel.playbackErrorMessage {
+                VStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(message)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.white)
+                }
+                .padding(18)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .padding(24)
+            }
+
             // 手势浮层指示器 HUD
             if let icon = gestureIndicatorIcon, let text = gestureIndicatorText {
                 VStack(spacing: 8) {
@@ -127,9 +150,20 @@ public struct FullscreenVideoPlayerView: View {
         .onAppear {
             viewModel.loadVideo(url: videoURL)
             viewModel.togglePlayPause()
+            #if os(iOS)
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            applyPreferredOrientation()
+            updateOrientationState()
+            #endif
         }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            updateOrientationState()
+        }
+        #endif
         .onDisappear {
             #if os(iOS)
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
             rotateToOrientation(.portrait)
             #endif
             viewModel.cleanup()
@@ -142,6 +176,9 @@ public struct FullscreenVideoPlayerView: View {
             #else
             AISubtitleSettingsSheet(viewModel: viewModel)
             #endif
+        }
+        .sheet(isPresented: $showSubtitleTimeline) {
+            SubtitleTimelineSheet(viewModel: viewModel)
         }
     }
 
@@ -173,7 +210,27 @@ public struct FullscreenVideoPlayerView: View {
                     .background(Capsule().fill(Color.cyan))
             }
 
+            if viewModel.isCompatibilityMode {
+                Text("兼容解码")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.orange))
+            }
+
             Spacer()
+
+            if !viewModel.subtitles.isEmpty {
+                Button(action: { showSubtitleTimeline = true }) {
+                    Image(systemName: "list.bullet.rectangle")
+                        .font(.system(size: 15))
+                        .foregroundColor(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(Color.white.opacity(0.15)))
+                }
+                .accessibilityLabel("查看字幕时间轴")
+            }
 
             // 剪辑按钮
             Button(action: {
@@ -339,9 +396,28 @@ public struct FullscreenVideoPlayerView: View {
     }
 
     #if os(iOS)
+    private func applyPreferredOrientation() {
+        let mask: UIInterfaceOrientationMask
+        switch settings.playbackOrientation {
+        case .auto: mask = .allButUpsideDown
+        case .portrait: mask = .portrait
+        case .landscape: mask = .landscape
+        case .landscapeLeft: mask = .landscapeLeft
+        case .landscapeRight: mask = .landscapeRight
+        }
+        rotateToOrientation(mask)
+    }
+
+    private func updateOrientationState() {
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }) else { return }
+        isLandscape = scene.interfaceOrientation.isLandscape
+    }
+
     private func toggleOrientation() {
-        isLandscape.toggle()
-        rotateToOrientation(isLandscape ? .landscapeRight : .portrait)
+        let target: UIInterfaceOrientationMask = isLandscape ? .portrait : .landscapeRight
+        rotateToOrientation(target)
     }
 
     private func rotateToOrientation(_ orientation: UIInterfaceOrientationMask) {
@@ -349,6 +425,9 @@ public struct FullscreenVideoPlayerView: View {
         let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: orientation)
         windowScene.requestGeometryUpdate(geometryPreferences) { error in
             print("Failed to rotate orientation: \(error)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            updateOrientationState()
         }
     }
 

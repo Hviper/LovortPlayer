@@ -13,6 +13,10 @@ public struct AISubtitleSettingsSheet: View {
     @State private var selectedTargetLanguage: String = "中文 (简体)"
     @State private var selectedEngine: AISubtitleEngineType = AISubtitleCoordinator.shared.currentEngine
     @State private var selectedOfflineModel: OfflineWhisperModel = AISubtitleCoordinator.shared.offlineModel
+    @State private var selectedTranslationProvider: SubtitleTranslationProviderType = AISubtitleCoordinator.shared.translationProvider
+    @State private var enhanceWithGPT: Bool = AISubtitleCoordinator.shared.isGPTEnhancementEnabled
+    @State private var translationAPIKey: String = ""
+    @State private var azureRegion: String = ""
     @State private var isLoggingIn: Bool = false
     @State private var loginMessage: String? = nil
     @State private var communityMatchStatus: String = ""
@@ -30,12 +34,18 @@ public struct AISubtitleSettingsSheet: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        subscriptionSection
-                        modelSelectionSection
+                        translationProviderSection
+                        if selectedTranslationProvider == .openAI {
+                            modelSelectionSection
+                        } else if enhanceWithGPT {
+                            modelSelectionSection
+                        }
                         offlineGenerationSection
                         displayToggleSection
                         proxySettingsSection
-                        manualApiKeySection
+                        if selectedTranslationProvider == .openAI || selectedEngine == .cloudOpenAI || enhanceWithGPT {
+                            manualApiKeySection
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 24)
@@ -54,7 +64,7 @@ public struct AISubtitleSettingsSheet: View {
                 }
             }
             .alert("手动输入大模型名称", isPresented: $showCustomModelSheet) {
-                TextField("如: gpt-6.1-sol, gpt-6-astra, gpt-5.6-terra", text: $customModelText)
+                TextField("如: gpt-6.1-sol, gpt-6-astra, gpt-6-luna", text: $customModelText)
                 Button("确定切换") {
                     let trimmed = customModelText.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
@@ -63,7 +73,7 @@ public struct AISubtitleSettingsSheet: View {
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("输入您账户可用的模型 ID（如 GPT-6.1 Sol、GPT-6 Astra、GPT-6 Sol、GPT-6 Luna、GPT-5.6 Sol、GPT-5.6 Terra 等），设定后将直接调用该模型执行影视字幕翻译。")
+                Text("输入 OpenAI Platform 项目可用的模型 ID，设定后用于影视字幕翻译或语境精修。")
             }
             .onAppear {
                 self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
@@ -71,12 +81,13 @@ public struct AISubtitleSettingsSheet: View {
                 let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
                 self.proxyPort = port > 0 ? String(port) : ""
 
-                let token = authManager.currentProfile?.accessToken ?? self.apiKey
-                if !token.isEmpty {
+                if self.apiKey.hasPrefix("sk-") {
                     Task {
-                        await modelManager.fetchAvailableModels(token: token)
+                        await modelManager.fetchAvailableModels(token: self.apiKey)
                     }
                 }
+                self.translationAPIKey = TranslationCredentialStore.shared.value(for: selectedTranslationProvider)
+                self.azureRegion = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
             }
         }
     }
@@ -197,9 +208,8 @@ public struct AISubtitleSettingsSheet: View {
                         .tint(.white.opacity(0.7))
                 } else {
                     Button(action: {
-                        let token = authManager.currentProfile?.accessToken ?? apiKey
                         Task {
-                            await modelManager.fetchAvailableModels(token: token)
+                            await modelManager.fetchAvailableModels(token: apiKey)
                         }
                     }) {
                         HStack(spacing: 4) {
@@ -299,7 +309,7 @@ public struct AISubtitleSettingsSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 WhisperKit 在设备端生成带时间轴的原文字幕；模型首次使用需联网下载，之后可完全离线转写。中文翻译需要 ChatGPT 登录或 API Key，生成结果会永久缓存在本地。")
+            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频，分片生成后立即显示原文字幕并持续向后处理。模型首次使用需联网下载，之后可完全离线转写。")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -419,7 +429,9 @@ public struct AISubtitleSettingsSheet: View {
                         sourceLanguage: selectedSourceLanguage,
                         targetLanguage: selectedTargetLanguage,
                         engine: selectedEngine,
-                        offlineModel: selectedOfflineModel
+                        offlineModel: selectedOfflineModel,
+                        translationProvider: selectedTranslationProvider,
+                        enhanceWithGPT: enhanceWithGPT
                     )
                 }) {
                     HStack(spacing: 8) {
@@ -473,6 +485,94 @@ public struct AISubtitleSettingsSheet: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color.white.opacity(0.06))
         )
+    }
+
+    private var translationProviderSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("中文字幕翻译方式")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white.opacity(0.6))
+
+            Menu {
+                ForEach(SubtitleTranslationProviderType.allCases) { provider in
+                    Button {
+                        selectedTranslationProvider = provider
+                        AISubtitleCoordinator.shared.translationProvider = provider
+                        translationAPIKey = TranslationCredentialStore.shared.value(for: provider)
+                    } label: {
+                        if provider == selectedTranslationProvider {
+                            Label(provider.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(provider.displayName)
+                        }
+                    }
+                }
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selectedTranslationProvider.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                        Text(selectedTranslationProvider.detail)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.5))
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .foregroundColor(AppSettings.shared.themeColor.color)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
+            }
+
+            if selectedTranslationProvider == .apple {
+                Label("语言包准备完成后，翻译在设备端进行，不上传字幕文本。", systemImage: "iphone.and.arrow.forward")
+                    .font(.system(size: 11))
+                    .foregroundColor(.green.opacity(0.85))
+            } else if selectedTranslationProvider.requiresAPIKey {
+                SecureField("\(selectedTranslationProvider.displayName) API Key", text: $translationAPIKey)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(.white)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                    .onChange(of: translationAPIKey) { value in
+                        TranslationCredentialStore.shared.setValue(value, for: selectedTranslationProvider)
+                    }
+                if selectedTranslationProvider == .azure {
+                    TextField("Azure 区域，例如 eastasia（全局资源可留空）", text: $azureRegion)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                        .onChange(of: azureRegion) { value in
+                            UserDefaults.standard.set(value.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "LovortAzureTranslatorRegion")
+                        }
+                }
+            } else {
+                Text("需要 OpenAI Platform API Key。ChatGPT Plus/Pro 订阅与 API 额度分别计费，不能直接替代 API Key。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.5))
+            }
+
+            if selectedTranslationProvider != .openAI {
+                Toggle(isOn: $enhanceWithGPT) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("生成后用 GPT 做影视语境精修")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                        Text("可选：统一人物称谓、敬语、俚语和角色口吻；需要 OpenAI Platform API Key")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.45))
+                    }
+                }
+                .tint(AppSettings.shared.themeColor.color)
+                .onChange(of: enhanceWithGPT) { value in
+                    AISubtitleCoordinator.shared.isGPTEnhancementEnabled = value
+                }
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.06)))
     }
 
     // MARK: - 4. 画面字幕浮层跟随显示
@@ -536,11 +636,11 @@ public struct AISubtitleSettingsSheet: View {
     // MARK: - 6. 手动 API Key (备用方式)
     private var manualApiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("OpenAI API Key (可选)")
+            Text("OpenAI Platform API Key")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.5))
 
-            SecureField("sk-... (填写后调用真实 Whisper API)", text: $apiKey)
+            SecureField("sk-...（用于 GPT 翻译/精修或云端转写）", text: $apiKey)
                 .font(.system(size: 13, design: .monospaced))
                 .foregroundColor(.white)
                 .padding(12)

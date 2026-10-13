@@ -28,11 +28,19 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     public var offlineModel: OfflineWhisperModel {
         didSet { UserDefaults.standard.set(offlineModel.rawValue, forKey: modelStorageKey) }
     }
+    public var translationProvider: SubtitleTranslationProviderType {
+        didSet { UserDefaults.standard.set(translationProvider.rawValue, forKey: translationProviderStorageKey) }
+    }
+    public var isGPTEnhancementEnabled: Bool {
+        didSet { UserDefaults.standard.set(isGPTEnhancementEnabled, forKey: gptEnhancementStorageKey) }
+    }
 
     private let openAIKeyStorageKey = "LovortOpenAIAPIKey"
     private let openAIKeychainService = "com.hviper.lovortplayer.openai-platform-key"
     private let engineStorageKey = "LovortSubtitleEngine"
     private let modelStorageKey = "LovortOfflineWhisperModel"
+    private let translationProviderStorageKey = "LovortTranslationProvider"
+    private let gptEnhancementStorageKey = "LovortGPTSubtitleEnhancement"
     private let localService = LocalWhisperSubtitleService()
     private let cacheStore = SubtitleCacheStore()
 
@@ -41,6 +49,9 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         currentEngine = AISubtitleEngineType(rawValue: engineValue) ?? .localWhisperKit
         let modelValue = UserDefaults.standard.string(forKey: modelStorageKey) ?? ""
         offlineModel = OfflineWhisperModel(rawValue: modelValue) ?? .highAccuracy
+        let providerValue = UserDefaults.standard.string(forKey: translationProviderStorageKey) ?? ""
+        translationProvider = SubtitleTranslationProviderType(rawValue: providerValue) ?? .apple
+        isGPTEnhancementEnabled = UserDefaults.standard.bool(forKey: gptEnhancementStorageKey)
     }
 
     public func getSavedOpenAIKey() -> String {
@@ -161,22 +172,34 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         sourceLanguage: SubtitleSourceLanguage = .automatic,
         engine: AISubtitleEngineType? = nil,
         model: OfflineWhisperModel? = nil,
+        translationProvider: SubtitleTranslationProviderType? = nil,
+        enhanceWithGPT: Bool? = nil,
+        preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false,
-        onProgress: (@Sendable (String) -> Void)? = nil
+        onProgress: (@Sendable (String) -> Void)? = nil,
+        onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil
     ) async throws -> [SubtitleLine] {
         let selectedEngine = engine ?? currentEngine
         let selectedModel = model ?? offlineModel
+        let selectedTranslationProvider = translationProvider ?? self.translationProvider
+        let shouldEnhanceWithGPT = enhanceWithGPT ?? isGPTEnhancementEnabled
         currentEngine = selectedEngine
         offlineModel = selectedModel
+        self.translationProvider = selectedTranslationProvider
+        isGPTEnhancementEnabled = shouldEnhanceWithGPT
 
         let cachedDocument = cacheStore.load(for: videoURL)
         let expectedModel = selectedEngine == .localWhisperKit ? selectedModel.rawValue : nil
         if !forceRegenerate {
             if let cachedDocument,
+               cachedDocument.isComplete != false,
                cachedDocument.sourceLanguage == sourceLanguage.rawValue,
                cachedDocument.targetLanguage == targetLanguage,
                cachedDocument.engine == selectedEngine,
-               cachedDocument.model == expectedModel {
+               cachedDocument.model == expectedModel,
+               cachedDocument.translationProvider == selectedTranslationProvider,
+               cachedDocument.translationComplete != false,
+               (cachedDocument.gptEnhanced ?? false) == (selectedTranslationProvider == .openAI || shouldEnhanceWithGPT) {
                 onProgress?("已加载匹配当前配置的本地字幕（共 \(cachedDocument.lines.count) 句）")
                 return cachedDocument.lines
             }
@@ -187,47 +210,61 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }
 
         let reusableOriginalLines: [SubtitleLine]? = {
-            guard forceRegenerate,
+            guard !forceRegenerate,
                   let cachedDocument,
+                  cachedDocument.isComplete != false,
                   cachedDocument.sourceLanguage == sourceLanguage.rawValue,
                   cachedDocument.engine == selectedEngine,
-                  cachedDocument.model == expectedModel,
-                  cachedDocument.lines.allSatisfy({ ($0.translatedText ?? "").isEmpty }) else { return nil }
-            return cachedDocument.lines
+                  cachedDocument.model == expectedModel else { return nil }
+            return cachedDocument.lines.map {
+                SubtitleLine(id: $0.id, startTime: $0.startTime, endTime: $0.endTime, originalText: $0.originalText)
+            }
+        }()
+
+        let resumableDocument: SubtitleDocument? = {
+            guard selectedEngine == .localWhisperKit,
+                  let cachedDocument,
+                  cachedDocument.isComplete == false,
+                  cachedDocument.sourceLanguage == sourceLanguage.rawValue,
+                  cachedDocument.engine == selectedEngine,
+                  cachedDocument.model == expectedModel else { return nil }
+            return cachedDocument
         }()
 
         let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
-        let subscriptionToken: String
-        do {
-            subscriptionToken = try await AuthManager.shared.accessTokenForRequests() ?? ""
-        } catch {
-            subscriptionToken = ""
-            onProgress?("⚠️ \(error.localizedDescription)")
-        }
-        let translationToken = platformKey.isEmpty ? subscriptionToken : platformKey
-
         let originalLines: [SubtitleLine]
         if let reusableOriginalLines {
             originalLines = reusableOriginalLines
             onProgress?("已复用上次离线转写结果，正在重试翻译...")
         } else {
-            onProgress?("正在提取“\(sourceLanguage.displayName)”音轨...")
-            let tempAudioURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lovort-audio-\(UUID().uuidString).m4a")
-            defer { try? FileManager.default.removeItem(at: tempAudioURL) }
-            try await extractAudioTrack(
-                from: videoURL,
-                outputAudioURL: tempAudioURL,
-                sourceLanguage: sourceLanguage
-            )
-
             switch selectedEngine {
             case .localWhisperKit:
                 originalLines = try await localService.transcribe(
-                    audioURL: tempAudioURL,
+                    audioURL: videoURL,
                     sourceLanguage: sourceLanguage,
                     model: selectedModel,
-                    onProgress: onProgress
+                    preferredStartTime: preferredStartTime,
+                    existingLines: resumableDocument?.lines ?? [],
+                    completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
+                    onProgress: onProgress,
+                    onPartialResult: { [cacheStore] update in
+                        let partialDocument = SubtitleDocument(
+                            sourceLanguage: sourceLanguage.rawValue,
+                            targetLanguage: targetLanguage,
+                            engine: selectedEngine,
+                            model: expectedModel,
+                            translationProvider: selectedTranslationProvider,
+                            isComplete: false,
+                            translationComplete: false,
+                            gptEnhanced: false,
+                            completedChunkIndexes: update.completedChunkIndexes,
+                            chunkDuration: LocalWhisperSubtitleService.chunkDuration,
+                            videoURL: videoURL,
+                            lines: update.lines
+                        )
+                        _ = try? cacheStore.save(partialDocument, for: videoURL)
+                        await onPartialResult?(update.lines)
+                    }
                 )
             case .cloudOpenAI:
                 guard platformKey.hasPrefix("sk-") else {
@@ -237,6 +274,15 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                         userInfo: [NSLocalizedDescriptionKey: "云端转写需要在设置中填写 OpenAI Platform API Key"]
                     )
                 }
+                onProgress?("正在提取“\(sourceLanguage.displayName)”音轨...")
+                let tempAudioURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("lovort-audio-\(UUID().uuidString).m4a")
+                defer { try? FileManager.default.removeItem(at: tempAudioURL) }
+                try await extractAudioTrack(
+                    from: videoURL,
+                    outputAudioURL: tempAudioURL,
+                    sourceLanguage: sourceLanguage
+                )
                 originalLines = try await CloudAISubtitleService(apiKey: platformKey).transcribe(
                     audioURL: tempAudioURL,
                     sourceLanguage: sourceLanguage,
@@ -265,6 +311,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             targetLanguage: targetLanguage,
             engine: selectedEngine,
             model: expectedModel,
+            translationProvider: selectedTranslationProvider,
+            isComplete: true,
+            translationComplete: false,
+            gptEnhanced: false,
             videoURL: videoURL,
             lines: originalLines
         )
@@ -273,18 +323,51 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
 
         var finalLines = originalLines
         var translationWarning: String?
-        if translationToken.isEmpty {
-            translationWarning = "未登录 ChatGPT 且未填写 API Key，已生成原文字幕，稍后可联网翻译"
-        } else {
-            do {
-                finalLines = try await CloudAISubtitleService(apiKey: translationToken).translate(
-                    lines: originalLines,
+        var translationComplete = false
+        var gptEnhanced = false
+        do {
+            let service: any SubtitleTranslationProviding
+            switch selectedTranslationProvider {
+            case .apple:
+                service = await AppleTranslationBridge.shared
+            case .openAI:
+                guard platformKey.hasPrefix("sk-") else { throw NSError(
+                    domain: "AISubtitleError",
+                    code: -13,
+                    userInfo: [NSLocalizedDescriptionKey: "GPT 翻译需要 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等同于 API 额度"]
+                ) }
+                service = OpenAITranslationProvider(token: platformKey)
+            case .deepL, .google, .azure:
+                let key = TranslationCredentialStore.shared.value(for: selectedTranslationProvider)
+                let region = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
+                service = RESTTranslationProvider(provider: selectedTranslationProvider, apiKey: key, azureRegion: region)
+            }
+            finalLines = try await service.translate(
+                lines: originalLines,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                onProgress: onProgress
+            )
+            translationComplete = true
+            gptEnhanced = selectedTranslationProvider == .openAI
+
+            if shouldEnhanceWithGPT, selectedTranslationProvider != .openAI {
+                guard platformKey.hasPrefix("sk-") else {
+                    throw NSError(
+                        domain: "AISubtitleError",
+                        code: -14,
+                        userInfo: [NSLocalizedDescriptionKey: "GPT 语境精修需要 OpenAI Platform API Key"]
+                    )
+                }
+                finalLines = try await CloudAISubtitleService(apiKey: platformKey).polish(
+                    lines: finalLines,
                     targetLanguage: targetLanguage,
                     onProgress: onProgress
                 )
-            } catch {
-                translationWarning = "翻译未完成：\(error.localizedDescription)；已保留原文字幕"
+                gptEnhanced = true
             }
+        } catch {
+            translationWarning = "翻译未完成：\(error.localizedDescription)；已保留原文字幕"
         }
 
         let document = SubtitleDocument(
@@ -292,6 +375,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             targetLanguage: targetLanguage,
             engine: selectedEngine,
             model: expectedModel,
+            translationProvider: selectedTranslationProvider,
+            isComplete: true,
+            translationComplete: translationComplete,
+            gptEnhanced: gptEnhanced,
             videoURL: videoURL,
             lines: finalLines
         )

@@ -1,7 +1,7 @@
 import SwiftUI
 
 public struct LANUploadSheet: View {
-    @State private var isServerRunning: Bool = false
+    @ObservedObject private var server = LANServerManager.shared
     @State private var ipAddress: String = "正在检测局域网..."
     @State private var serverPort: UInt16 = 8080
     @State private var receivedFilesCount: Int = 0
@@ -44,10 +44,11 @@ public struct LANUploadSheet: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.white.opacity(0.4))
 
-                        Text("http://\(ipAddress):\(serverPort)")
-                            .font(.system(size: 20, weight: .bold, design: .monospaced))
+                        Text("http://\(ipAddress):\(serverPort)/?token=\(server.accessToken)")
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundColor(.cyan)
                             .textSelection(.enabled)
+                            .multilineTextAlignment(.center)
 
                         Text("已支持电脑拖拽，传输完毕后手机将自动落盘入库")
                             .font(.system(size: 11))
@@ -96,13 +97,20 @@ public struct LANUploadSheet: View {
                         .transition(.scale.combined(with: .opacity))
                     }
 
+                    if let error = server.lastError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 20)
+                    }
+
                     // 启停按钮
                     Button(action: toggleServer) {
                         HStack(spacing: 8) {
                             Circle()
-                                .fill(isServerRunning ? Color.green : Color.red)
+                                .fill(server.isRunning ? Color.green : Color.red)
                                 .frame(width: 8, height: 8)
-                            Text(isServerRunning ? "传输服务运行中 (点击停止)" : "启动传输服务")
+                            Text(server.isRunning ? "传输服务运行中 (点击停止)" : "启动传输服务")
                                 .font(.system(size: 14, weight: .semibold))
                         }
                         .foregroundColor(.white)
@@ -141,6 +149,10 @@ public struct LANUploadSheet: View {
                 }
             }
         }
+        .onDisappear {
+            LANServerManager.shared.onFileReceived = nil
+            LANServerManager.shared.stopServer()
+        }
     }
 
     private func startService() {
@@ -150,16 +162,13 @@ public struct LANUploadSheet: View {
             self.ipAddress = "127.0.0.1"
         }
         try? LANServerManager.shared.startServer(port: 8080)
-        self.isServerRunning = LANServerManager.shared.isRunning
     }
 
     private func toggleServer() {
-        if isServerRunning {
+        if server.isRunning {
             LANServerManager.shared.stopServer()
-            isServerRunning = false
         } else {
             try? LANServerManager.shared.startServer(port: 8080)
-            isServerRunning = LANServerManager.shared.isRunning
         }
     }
 }

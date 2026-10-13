@@ -6,6 +6,12 @@ public struct SubtitleDocument: Codable, Sendable {
     public let targetLanguage: String
     public let engine: AISubtitleEngineType
     public let model: String?
+    public let translationProvider: SubtitleTranslationProviderType?
+    public let isComplete: Bool?
+    public let translationComplete: Bool?
+    public let gptEnhanced: Bool?
+    public let completedChunkIndexes: [Int]?
+    public let chunkDuration: TimeInterval?
     public let createdAt: Date
     public let videoFileSize: Int64?
     public let videoModificationDate: Date?
@@ -16,6 +22,12 @@ public struct SubtitleDocument: Codable, Sendable {
         targetLanguage: String,
         engine: AISubtitleEngineType,
         model: String?,
+        translationProvider: SubtitleTranslationProviderType? = nil,
+        isComplete: Bool = true,
+        translationComplete: Bool? = nil,
+        gptEnhanced: Bool? = nil,
+        completedChunkIndexes: [Int]? = nil,
+        chunkDuration: TimeInterval? = nil,
         videoURL: URL? = nil,
         lines: [SubtitleLine]
     ) {
@@ -24,6 +36,12 @@ public struct SubtitleDocument: Codable, Sendable {
         self.targetLanguage = targetLanguage
         self.engine = engine
         self.model = model
+        self.translationProvider = translationProvider
+        self.isComplete = isComplete
+        self.translationComplete = translationComplete
+        self.gptEnhanced = gptEnhanced
+        self.completedChunkIndexes = completedChunkIndexes
+        self.chunkDuration = chunkDuration
         self.createdAt = Date()
         if let videoURL,
            let values = try? videoURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {

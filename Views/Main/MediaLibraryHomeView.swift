@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Translation
 #if os(iOS)
 import UIKit
 import PhotosUI
@@ -18,6 +19,7 @@ public struct MediaLibraryHomeView: View {
     @State private var pinInput: String = ""
     @State private var isDecoySpace: Bool = false
     @State private var showSettings: Bool = false
+    @ObservedObject private var appleTranslation = AppleTranslationBridge.shared
 
     #if os(iOS)
     @State private var isPhotosPickerPresented: Bool = false
@@ -232,6 +234,9 @@ public struct MediaLibraryHomeView: View {
             } message: {
                 Text("输入安全密码以解锁保密视频")
             }
+        }
+        .translationTask(appleTranslation.configuration) { session in
+            await appleTranslation.perform(using: session)
         }
     }
 

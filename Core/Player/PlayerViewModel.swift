@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreGraphics
 import Combine
+import KSPlayer
 #if os(iOS)
 import UIKit
 import MediaPlayer
@@ -14,7 +15,14 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var currentTime: TimeInterval = 0
     @Published public var duration: TimeInterval = 0
     @Published public var isBuffering: Bool = false
+    @Published public var playbackErrorMessage: String? = nil
     @Published public var playbackRate: Float = 1.0
+
+    // AVPlayer 不支持的容器由 KSPlayer 自动从 AVFoundation 回退到 FFmpeg。
+    @Published public private(set) var isCompatibilityMode: Bool = false
+    public private(set) var compatibilityCoordinator: KSVideoPlayer.Coordinator?
+    public private(set) var compatibilityOptions: KSOptions?
+    private var pendingCompatibilityStart: TimeInterval = 0
 
     // AV1 (libdav1d) 软解渲染状态
     @Published public var isAV1SoftwareMode: Bool = false
@@ -53,13 +61,16 @@ public final class PlayerViewModel: ObservableObject {
     public init() {}
 
     public func loadVideo(url: URL) {
+        cleanupPlaybackEngines(saveProgress: false)
         subtitleGenerationTask?.cancel()
         subtitleGenerationTask = nil
         isGeneratingSubtitles = false
         generatingSubtitleStatusText = ""
         subtitleErrorMessage = nil
+        playbackErrorMessage = nil
         subtitles = []
         currentSubtitle = nil
+        isAISubtitleEnabled = false
         self.currentVideoURL = url
         resetControlsTimeout()
 
@@ -77,6 +88,11 @@ public final class PlayerViewModel: ObservableObject {
 
         // 读取历史播放进度
         let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
+
+        if Self.requiresCompatibilityPlayer(url) {
+            configureCompatibilityPlayer(url: url, savedPosition: savedPosition)
+            return
+        }
 
         // 1. 检测是否为 AV1 (av01) 编码视频：若为 AV1，启动 libdav1d 实时软解引擎 + 纯音频轨合成器（绕过 iOS VideoToolbox 对非 A17 Pro 机型的硬解封锁）
         if let engine = AV1SoftwareDecoderEngine(url: url) {
@@ -148,6 +164,58 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
+    private static func requiresCompatibilityPlayer(_ url: URL) -> Bool {
+        ["mkv", "avi", "webm", "flv", "wmv", "ts", "m2ts", "vob", "ogv"]
+            .contains(url.pathExtension.lowercased())
+    }
+
+    private func configureCompatibilityPlayer(url: URL, savedPosition: TimeInterval) {
+        let options = KSOptions()
+        options.hardwareDecode = true
+        let coordinator = KSVideoPlayer.Coordinator()
+        pendingCompatibilityStart = savedPosition
+        compatibilityOptions = options
+        compatibilityCoordinator = coordinator
+        isCompatibilityMode = true
+
+        coordinator.onStateChanged = { [weak self, weak coordinator] layer, state in
+            Task { @MainActor [weak self, weak coordinator] in
+                guard let self, let coordinator else { return }
+                self.isBuffering = state == .preparing || state == .buffering
+                self.isPlaying = state.isPlaying
+                if state == .readyToPlay {
+                    let total = layer.player.duration
+                    if total.isFinite, total > 0 {
+                        self.duration = total
+                        self.clipEndTime = min(total, 30)
+                    }
+                    if self.pendingCompatibilityStart > 3,
+                       self.pendingCompatibilityStart < total - 5 {
+                        coordinator.seek(time: self.pendingCompatibilityStart)
+                    }
+                    coordinator.playbackRate = self.playbackRate
+                }
+            }
+        }
+        coordinator.onPlay = { [weak self] current, total in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isScrubbing else { return }
+                if current.isFinite { self.currentTime = current }
+                if total.isFinite, total > 0 { self.duration = total }
+                self.updateActiveSubtitle(at: current)
+                self.saveCurrentProgress()
+            }
+        }
+        coordinator.onFinish = { [weak self] _, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isPlaying = false
+                self.isBuffering = false
+                if let error { self.playbackErrorMessage = "视频解码失败：\(error.localizedDescription)" }
+            }
+        }
+    }
+
     private func startAV1RenderLoop() {
         av1RenderTask?.cancel()
         av1RenderTask = Task { [weak self] in
@@ -197,6 +265,18 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func togglePlayPause() {
+        if isCompatibilityMode {
+            if isPlaying {
+                compatibilityCoordinator?.playerLayer?.pause()
+                isPlaying = false
+            } else {
+                compatibilityCoordinator?.playerLayer?.play()
+                compatibilityCoordinator?.playbackRate = playbackRate
+                isPlaying = true
+                resetControlsTimeout()
+            }
+            return
+        }
         if isPlaying {
             player?.pause()
             isPlaying = false
@@ -209,12 +289,20 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func pause() {
+        compatibilityCoordinator?.playerLayer?.pause()
         player?.pause()
         isPlaying = false
     }
 
     public func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration))
+        if isCompatibilityMode {
+            compatibilityCoordinator?.seek(time: clamped)
+            currentTime = clamped
+            updateActiveSubtitle(at: clamped)
+            saveCurrentProgress()
+            return
+        }
         let cmTime = CMTime(seconds: clamped, preferredTimescale: 600)
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = clamped
@@ -244,6 +332,7 @@ public final class PlayerViewModel: ObservableObject {
 
     public func setPlaybackRate(_ rate: Float) {
         self.playbackRate = rate
+        compatibilityCoordinator?.playbackRate = rate
         if isPlaying {
             player?.rate = rate
         }
@@ -265,7 +354,9 @@ public final class PlayerViewModel: ObservableObject {
         sourceLanguage: SubtitleSourceLanguage = .automatic,
         targetLanguage: String = "中文 (简体)",
         engine: AISubtitleEngineType = .localWhisperKit,
-        offlineModel: OfflineWhisperModel = .highAccuracy
+        offlineModel: OfflineWhisperModel = .highAccuracy,
+        translationProvider: SubtitleTranslationProviderType = .apple,
+        enhanceWithGPT: Bool = false
     ) {
         guard let url = currentVideoURL else { return }
         subtitleGenerationTask?.cancel()
@@ -281,11 +372,22 @@ public final class PlayerViewModel: ObservableObject {
                     sourceLanguage: sourceLanguage,
                     engine: engine,
                     model: offlineModel,
-                    forceRegenerate: true,
+                    translationProvider: translationProvider,
+                    enhanceWithGPT: enhanceWithGPT,
+                    preferredStartTime: self.currentTime,
+                    forceRegenerate: false,
                     onProgress: { [weak self] status in
                         Task { @MainActor in
                             guard let self, self.currentVideoURL == url else { return }
                             self.generatingSubtitleStatusText = status
+                        }
+                    },
+                    onPartialResult: { [weak self] partialLines in
+                        await MainActor.run {
+                            guard let self, self.currentVideoURL == url else { return }
+                            self.subtitles = partialLines
+                            self.isAISubtitleEnabled = true
+                            self.updateActiveSubtitle(at: self.currentTime)
                         }
                     }
                 )
@@ -384,6 +486,13 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func cleanup() {
+        cleanupPlaybackEngines(saveProgress: true)
+        MediaLibraryManager.shared.reloadLibrary()
+        controlsHideTimer?.cancel()
+    }
+
+    private func cleanupPlaybackEngines(saveProgress: Bool) {
+        if saveProgress { saveCurrentProgress() }
         // 停止 AV1 软解线程并释放解码器上下文
         av1RenderTask?.cancel()
         av1RenderTask = nil
@@ -392,16 +501,23 @@ public final class PlayerViewModel: ObservableObject {
         currentSoftwareFrame = nil
 
         // 彻底暂停并置空 player，防止后台发声
-        player?.pause()
-        player?.replaceCurrentItem(with: nil)
-        player = nil
-        isPlaying = false
-
-        saveCurrentProgress()
-        MediaLibraryManager.shared.reloadLibrary()
-        if timeObserverToken != nil {
+        let oldPlayer = player
+        oldPlayer?.pause()
+        if let token = timeObserverToken {
+            oldPlayer?.removeTimeObserver(token)
             timeObserverToken = nil
         }
-        controlsHideTimer?.cancel()
+        oldPlayer?.replaceCurrentItem(with: nil)
+        player = nil
+        isPlaying = false
+        compatibilityCoordinator?.playerLayer?.stop()
+        compatibilityCoordinator?.resetPlayer()
+        compatibilityCoordinator = nil
+        compatibilityOptions = nil
+        isCompatibilityMode = false
+        pendingCompatibilityStart = 0
+        currentTime = 0
+        duration = 0
+        isBuffering = false
     }
 }

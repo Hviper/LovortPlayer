@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: "com.hviper"
   xcodeVersion: "15.0"
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "18.0"
 packages:
   libdav1d:
     url: https://github.com/SDWebImage/libdav1d-Xcode.git
@@ -11,11 +11,14 @@ packages:
   whisperkit:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
     exactVersion: "1.1.1"
+  ksplayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    exactVersion: "2.3.4"
 targets:
   LovortPlayer:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "18.0"
     sources:
       - path: App
       - path: Core
@@ -25,6 +28,8 @@ targets:
         product: libdav1d
       - package: whisperkit
         product: WhisperKit
+      - package: ksplayer
+        product: KSPlayer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.hviper.lovortplayer"

@@ -109,7 +109,7 @@ public struct LANWebAssets {
             <div class="dropzone" id="dropzone">
                 <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
                 <div>拖拽视频文件到此处，或点击浏览</div>
-                <input type="file" id="fileInput" multiple accept="video/*,.mkv,.mp4,.mov,.avi" style="display:none">
+                <input type="file" id="fileInput" multiple accept="video/*,.mkv,.mp4,.mov,.avi,.webm,.flv,.wmv,.ts,.m2ts,.vob,.ogv" style="display:none">
                 <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择本地视频</button>
             </div>
             <div class="progress-container" id="progressContainer">
@@ -143,6 +143,7 @@ public struct LANWebAssets {
                     const xhr = new XMLHttpRequest();
                     xhr.open('POST', '/upload', true);
                     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+                    xhr.setRequestHeader('X-Upload-Token', '{{UPLOAD_TOKEN}}');
                     xhr.upload.onprogress = (e) => {
                         if (e.lengthComputable) {
                             const percent = Math.round((e.loaded / e.total) * 100);
@@ -160,7 +161,13 @@ public struct LANWebAssets {
                             progressFill.style.width = '100%';
                             const item = document.createElement('div');
                             item.className = 'file-item';
-                            item.innerHTML = '<span>' + file.name + '</span><span class="file-success">已保存到 iPhone</span>';
+                            const name = document.createElement('span');
+                            name.textContent = file.name;
+                            const status = document.createElement('span');
+                            status.className = 'file-success';
+                            status.textContent = '已保存到 iPhone';
+                            item.appendChild(name);
+                            item.appendChild(status);
                             fileList.appendChild(item);
                         } else {
                             progressText.innerText = '❌ 上传失败，请检查网络连接';

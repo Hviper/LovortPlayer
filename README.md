@@ -8,14 +8,15 @@
 
 | 模块 | 功能项 | 当前状态 | 对应核心代码 | 详细说明 |
 |---|---|:---:|---|---|
-| **核心播放** | 硬件加速解码播放 | ✅ 已完成 | `Core/Player/PlayerViewModel.swift`<br>`Views/Player/NativeVideoPlayerView.swift` | 基于 AVFoundation 原生硬件解码，零卡顿低功耗 |
+| **核心播放** | 原生优先 + FFmpeg 兼容回退 | ✅ 已完成 | `Core/Player/PlayerViewModel.swift`<br>`Views/Player/NativeVideoPlayerView.swift` | MP4/MOV 走 AVFoundation；MKV/AVI/WebM 等由 KSPlayer 自动回退 FFmpeg |
 | **Lovort 交互** | 极简深色全屏手势 | ✅ 已完成 | `Views/Player/FullscreenVideoPlayerView.swift` | 左右滑屏调亮度/音量，双击快进快退，自动淡出悬浮控制 |
 | **隐私保险箱** | Face ID + AES-GCM | ✅ 已完成 | `Core/Vault/VaultManager.swift` | 媒体库标题长按 1.2s 触发生物识别，解密隐藏视频沙盒 |
 | **无损剪辑** | GOP Passthrough 剪裁 | ✅ 已完成 | `Core/Clip/LosslessClipManager.swift`<br>`Views/Player/InPlayerClipBar.swift` | 播放内标记 In/Out 毫秒点，秒级无损码流复制导出 |
-| **局域网直传** | HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 手机内嵌 Web Server，PC 浏览器拖拽即可上传大视频 |
+| **局域网直传** | 流式 HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 一次性口令、流式落盘、空间/格式校验、自动入库，避免大文件驻留内存 |
 | **媒体库** | 16:9 卡片瀑布流 | ✅ 已完成 | `Views/Main/MediaLibraryHomeView.swift`<br>`Views/Main/VideoCardView.swift` | 封面卡片流、时长/分辨率标签、分类 Tabs |
-| **AI 字幕引擎** | 离线转写 + 分批翻译 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/CloudAISubtitleService.swift` | WhisperKit 设备端转写、VAD 与时间戳；GPT 分批结构化翻译；双语 JSON/SRT 缓存 |
-| **认证授权** | Keychain + OAuth PKCE | 🟡 基础框架完成 | `Core/Auth/AuthManager.swift` | Keychain 安全存取已就绪，待对接 Antigravity/ChatGPT 登录端点 |
+| **AI 字幕引擎** | 渐进式离线转写 + 多翻译服务 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/SubtitleTranslationProvider.swift` | 播放点优先的 4 分钟分片、断点缓存；Apple/DeepL/Google/Azure/GPT 翻译；双语 JSON/SRT |
+| **视频导出** | 分享 / 相册 / 文件 | ✅ 已完成 | `Core/Export/VideoExportManager.swift` | 系统分享面板、保存到系统相册、导出到“文件”App |
+| **GPT 语境精修** | 可选字幕导演模式 | ✅ 已完成 | `Core/AISubtitle/CloudAISubtitleService.swift` | 在普通翻译后统一人物称谓、敬语、俚语和角色口吻；需要 OpenAI Platform API Key |
 | **CI / CD** | GitHub Actions 自动打包 | ✅ 已完成 | `.github/workflows/build-ipa.yml` | 提交代码自动触发云端 macOS 构建并发布到 Releases |
 
 ---
@@ -51,8 +52,8 @@
 ## 🛠️ 下一步开发计划 (Next Steps)
 
 1. **真实影片回归集**：用日语动漫、英语美剧和多人对白样本持续评估字错率、时间轴和翻译一致性。
-2. **多格式解码增强**：集成 FFmpeg 软解模块，扩充对高规格原生 MKV / FLAC 音轨的原生播放支持。
-3. **局域网分片续传**：优化 `LANServerManager.swift` 中超大文件（如 4K 10GB+）的断点续传机制。
+2. **真实设备性能测试**：评估高码率 MKV 的耗电、发热与后台内存峰值。
+3. **局域网断点续传**：在现有流式落盘基础上加入可恢复的分片协议。
 
 ---
 
@@ -73,5 +74,6 @@ cd LovortPlayer
 1. 在播放器的“AI 字幕选项”中选择“离线 WhisperKit”。
 2. 首次选择模型时需要联网下载 Core ML 模型；下载完成后，音频提取和原文转写无需联网。
 3. “高精度”模型适合日语动漫和影视；旧设备可选择 Small 或 Base 降低内存占用。
-4. 若已登录 ChatGPT 或填写 OpenAI API Key，转写后会联网分批翻译；没有凭据时仍会保存可离线观看的原文字幕。
-5. 双语结果同时写入 `.lovort-subtitles.json`（保留原文/译文结构）和标准 `.srt`。云端 Whisper 选项会自动按 4 分钟切片，规避 25 MB 单文件限制。
+4. 翻译可选择 Apple 设备端语言包、DeepL、Google、Azure 或 GPT；没有网络凭据时仍会保存原文字幕。
+5. ChatGPT Plus/Pro 订阅不等同于 OpenAI API 额度。GPT 翻译、语境精修和云端转写需要有效的 OpenAI Platform API Key。
+6. 长视频按 4 分钟分片，优先处理当前播放点附近；每片完成立即显示并写入断点缓存。双语结果写入 `.lovort-subtitles.json` 和标准 `.srt`。
