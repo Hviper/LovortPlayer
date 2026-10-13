@@ -99,9 +99,12 @@ public final class MediaLibraryManager: ObservableObject {
         var duration: TimeInterval = 0
         if let dur = try? await asset.load(.duration) {
             let seconds = CMTimeGetSeconds(dur)
-            if seconds.isFinite && !seconds.isNaN {
+            if seconds.isFinite && !seconds.isNaN && seconds > 0 {
                 duration = seconds
             }
+        }
+        if duration <= 0, let av1Info = MP4AV1Demuxer.parseAV1Track(from: url) {
+            duration = av1Info.duration
         }
 
         // 关联历史播放进度

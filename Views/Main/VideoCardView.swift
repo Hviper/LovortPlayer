@@ -146,13 +146,22 @@ public struct VideoCardView: View {
 
     private func generateThumbnail() async {
         guard thumbnail == nil else { return }
-        let asset = AVURLAsset(url: video.fileURL)
+        let fileURL = video.fileURL
+        let asset = AVURLAsset(url: fileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 480, height: 270)
         let targetSec = video.lastPlayedPosition > 1 ? video.lastPlayedPosition : min(1.0, max(0, video.duration / 2))
         let time = CMTime(seconds: targetSec, preferredTimescale: 600)
-        if let cgImage = try? await generator.image(at: time).image {
+
+        var resolvedCGImage: CGImage? = try? await generator.image(at: time).image
+        if resolvedCGImage == nil {
+            resolvedCGImage = await Task.detached(priority: .utility) {
+                AV1SoftwareDecoderEngine.extractThumbnail(from: fileURL, at: targetSec)
+            }.value
+        }
+
+        if let cgImage = resolvedCGImage {
             #if os(iOS)
             self.thumbnail = Image(uiImage: UIImage(cgImage: cgImage))
             #elseif os(macOS)

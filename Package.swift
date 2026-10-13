@@ -18,10 +18,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        .package(url: "https://github.com/SDWebImage/libdav1d-Xcode.git", from: "1.1.0")
     ],
     targets: [
         .target(
             name: "LovortPlayerCore",
+            dependencies: [
+                .product(name: "libdav1d", package: "libdav1d-Xcode")
+            ],
             path: "Core"
         ),
         .target(

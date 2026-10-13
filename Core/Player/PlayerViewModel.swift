@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreGraphics
 import Combine
 #if os(iOS)
 import UIKit
@@ -14,6 +15,12 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var duration: TimeInterval = 0
     @Published public var isBuffering: Bool = false
     @Published public var playbackRate: Float = 1.0
+
+    // AV1 (libdav1d) 软解渲染状态
+    @Published public var isAV1SoftwareMode: Bool = false
+    @Published public var currentSoftwareFrame: CGImage? = nil
+    private var av1Engine: AV1SoftwareDecoderEngine? = nil
+    private var av1RenderTask: Task<Void, Never>? = nil
 
     // 手势与 HUD 控制
     @Published public var showControls: Bool = true
@@ -44,9 +51,6 @@ public final class PlayerViewModel: ObservableObject {
 
     public func loadVideo(url: URL) {
         self.currentVideoURL = url
-        let playerItem = AVPlayerItem(url: url)
-        self.player = AVPlayer(playerItem: playerItem)
-        setupTimeObserver()
         resetControlsTimeout()
 
         // 尝试自动载入字幕
@@ -57,6 +61,60 @@ public final class PlayerViewModel: ObservableObject {
 
         // 读取历史播放进度
         let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
+
+        // 1. 检测是否为 AV1 (av01) 编码视频：若为 AV1，启动 libdav1d 实时软解引擎 + 纯音频轨合成器（绕过 iOS VideoToolbox 对非 A17 Pro 机型的硬解封锁）
+        if let engine = AV1SoftwareDecoderEngine(url: url) {
+            self.av1Engine = engine
+            self.isAV1SoftwareMode = true
+            let totalDuration = engine.trackInfo.duration
+            self.duration = totalDuration
+            self.clipEndTime = min(totalDuration, 30.0)
+
+            let startPos = (savedPosition > 3.0 && savedPosition < totalDuration - 5.0) ? savedPosition : 0.0
+            self.currentTime = startPos
+
+            // 立即解码首帧画面
+            Task.detached(priority: .userInteractive) {
+                if let firstFrame = engine.decodeFrame(at: startPos) {
+                    await MainActor.run {
+                        self.currentSoftwareFrame = firstFrame
+                    }
+                }
+            }
+
+            // 异步构建仅包含 AAC 音轨的 AVMutableComposition 交给 AVPlayer 播放声音
+            Task {
+                let asset = AVURLAsset(url: url)
+                if let audioTracks = try? await asset.loadTracks(withMediaType: .audio), !audioTracks.isEmpty {
+                    let composition = AVMutableComposition()
+                    for track in audioTracks {
+                        if let compTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid),
+                           let timeRange = try? await track.load(.timeRange) {
+                            try? compTrack.insertTimeRange(timeRange, of: track, at: .zero)
+                        }
+                    }
+                    let audioItem = AVPlayerItem(asset: composition)
+                    self.player = AVPlayer(playerItem: audioItem)
+                    if startPos > 0 {
+                        let cmTime = CMTime(seconds: startPos, preferredTimescale: 600)
+                        await self.player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                    }
+                    if self.isPlaying {
+                        self.player?.play()
+                        self.player?.rate = self.playbackRate
+                    }
+                }
+            }
+
+            startAV1RenderLoop()
+            return
+        }
+
+        // 2. 标准 H.264 / HEVC 原生硬解流程
+        self.isAV1SoftwareMode = false
+        let playerItem = AVPlayerItem(url: url)
+        self.player = AVPlayer(playerItem: playerItem)
+        setupTimeObserver()
 
         Task {
             if let durationCM = try? await playerItem.asset.load(.duration) {
@@ -74,14 +132,61 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
+    private func startAV1RenderLoop() {
+        av1RenderTask?.cancel()
+        av1RenderTask = Task { [weak self] in
+            var lastSaveTime: TimeInterval = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 33_000_000) // ~30 FPS
+                guard let self = self, let engine = self.av1Engine else { break }
+                guard self.isPlaying && !self.isScrubbing else { continue }
+
+                var targetTime = self.currentTime
+                if let p = self.player, p.currentItem?.status == .readyToPlay {
+                    if p.rate == 0 {
+                        p.play()
+                        p.rate = self.playbackRate
+                    }
+                    let audioSec = CMTimeGetSeconds(p.currentTime())
+                    if audioSec.isFinite && !audioSec.isNaN && audioSec > 0 {
+                        targetTime = audioSec
+                    } else {
+                        targetTime = min(self.duration, self.currentTime + 0.033 * Double(self.playbackRate))
+                    }
+                } else {
+                    targetTime = min(self.duration, self.currentTime + 0.033 * Double(self.playbackRate))
+                }
+
+                self.currentTime = targetTime
+                self.updateActiveSubtitle(at: targetTime)
+
+                if abs(targetTime - lastSaveTime) >= 2.0 {
+                    lastSaveTime = targetTime
+                    self.saveCurrentProgress()
+                }
+
+                let decoded = await Task.detached(priority: .userInteractive) {
+                    engine.decodeFrame(at: targetTime)
+                }.value
+
+                if let decoded = decoded, !Task.isCancelled {
+                    self.currentSoftwareFrame = decoded
+                }
+
+                if targetTime >= self.duration && self.duration > 0 {
+                    self.pause()
+                }
+            }
+        }
+    }
+
     public func togglePlayPause() {
-        guard let player = player else { return }
         if isPlaying {
-            player.pause()
+            player?.pause()
             isPlaying = false
         } else {
-            player.play()
-            player.rate = playbackRate
+            player?.play()
+            player?.rate = playbackRate
             isPlaying = true
             resetControlsTimeout()
         }
@@ -93,11 +198,22 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func seek(to time: TimeInterval) {
-        let cmTime = CMTime(seconds: max(0, min(time, duration)), preferredTimescale: 600)
+        let clamped = max(0, min(time, duration))
+        let cmTime = CMTime(seconds: clamped, preferredTimescale: 600)
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        currentTime = time
-        updateActiveSubtitle(at: time)
+        currentTime = clamped
+        updateActiveSubtitle(at: clamped)
         saveCurrentProgress()
+
+        if isAV1SoftwareMode, let engine = av1Engine {
+            Task.detached(priority: .userInteractive) {
+                if let frame = engine.decodeFrame(at: clamped) {
+                    await MainActor.run {
+                        self.currentSoftwareFrame = frame
+                    }
+                }
+            }
+        }
     }
 
     public func fastForward(by seconds: TimeInterval = 10) {
@@ -223,6 +339,13 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func cleanup() {
+        // 停止 AV1 软解线程并释放解码器上下文
+        av1RenderTask?.cancel()
+        av1RenderTask = nil
+        av1Engine?.close()
+        av1Engine = nil
+        currentSoftwareFrame = nil
+
         // 彻底暂停并置空 player，防止后台发声
         player?.pause()
         player?.replaceCurrentItem(with: nil)
@@ -231,7 +354,7 @@ public final class PlayerViewModel: ObservableObject {
 
         saveCurrentProgress()
         MediaLibraryManager.shared.reloadLibrary()
-        if let token = timeObserverToken {
+        if timeObserverToken != nil {
             timeObserverToken = nil
         }
         controlsHideTimer?.cancel()

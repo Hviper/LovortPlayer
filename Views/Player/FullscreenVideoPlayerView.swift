@@ -29,39 +29,56 @@ public struct FullscreenVideoPlayerView: View {
             // 背景黑底，忽略全屏安全区
             Color.black.ignoresSafeArea()
 
-            // 原生 AVPlayer 视频渲染层
-            NativeVideoPlayerView(player: viewModel.player)
-                .ignoresSafeArea()
-                .onTapGesture(count: 2) { location in
-                    #if os(iOS)
-                    let screenWidth = UIScreen.main.bounds.width
-                    if location.x < screenWidth / 2 {
-                        viewModel.rewind(by: 10)
-                        showGestureHUD(icon: "gobackward.10", text: "-10s", autoDismiss: true)
+            // 原生 AVPlayer 视频渲染层 或 libdav1d AV1 软解渲染层
+            ZStack {
+                NativeVideoPlayerView(player: viewModel.player)
+                    .ignoresSafeArea()
+
+                if viewModel.isAV1SoftwareMode {
+                    if let cgFrame = viewModel.currentSoftwareFrame {
+                        Image(decorative: cgFrame, scale: 1.0, orientation: .up)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .ignoresSafeArea()
                     } else {
-                        viewModel.fastForward(by: 10)
-                        showGestureHUD(icon: "goforward.10", text: "+10s", autoDismiss: true)
-                    }
-                    #else
-                    viewModel.fastForward(by: 10)
-                    #endif
-                }
-                .onTapGesture(count: 1) {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        viewModel.toggleControls()
+                        ProgressView("正在初始化 AV1 (libdav1d) 软解引擎...")
+                            .tint(.cyan)
+                            .foregroundColor(.white.opacity(0.8))
                     }
                 }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { location in
                 #if os(iOS)
-                .gesture(
-                    DragGesture(minimumDistance: 15)
-                        .onChanged { value in
-                            handlePanGesture(value)
-                        }
-                        .onEnded { value in
-                            handlePanEnded(value)
-                        }
-                )
+                let screenWidth = UIScreen.main.bounds.width
+                if location.x < screenWidth / 2 {
+                    viewModel.rewind(by: 10)
+                    showGestureHUD(icon: "gobackward.10", text: "-10s", autoDismiss: true)
+                } else {
+                    viewModel.fastForward(by: 10)
+                    showGestureHUD(icon: "goforward.10", text: "+10s", autoDismiss: true)
+                }
+                #else
+                viewModel.fastForward(by: 10)
                 #endif
+            }
+            .onTapGesture(count: 1) {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    viewModel.toggleControls()
+                }
+            }
+            #if os(iOS)
+            .gesture(
+                DragGesture(minimumDistance: 15)
+                    .onChanged { value in
+                        handlePanGesture(value)
+                    }
+                    .onEnded { value in
+                        handlePanEnded(value)
+                    }
+            )
+            #endif
 
             // AI 实时双语字幕图层 (确保置于控制层下方，不受控制栏显隐影响)
             AISubtitleOverlayView(subtitle: viewModel.currentSubtitle)
@@ -130,7 +147,7 @@ public struct FullscreenVideoPlayerView: View {
 
     // MARK: - 顶部导航条
     private var topNavigationBar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Button(action: {
                 viewModel.cleanup()
                 onDismiss()
@@ -146,6 +163,15 @@ public struct FullscreenVideoPlayerView: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.white.opacity(0.9))
                 .lineLimit(1)
+
+            if viewModel.isAV1SoftwareMode {
+                Text("AV1 软解")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.cyan))
+            }
 
             Spacer()
 

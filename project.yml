@@ -4,6 +4,10 @@ options:
   xcodeVersion: "15.0"
   deploymentTarget:
     iOS: "17.0"
+packages:
+  libdav1d:
+    url: https://github.com/SDWebImage/libdav1d-Xcode.git
+    from: "1.1.0"
 targets:
   LovortPlayer:
     type: application
@@ -13,6 +17,9 @@ targets:
       - path: App
       - path: Core
       - path: Views
+    dependencies:
+      - package: libdav1d
+        product: libdav1d
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.hviper.lovortplayer"
