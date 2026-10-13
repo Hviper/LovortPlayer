@@ -34,7 +34,9 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var showAISubtitlePanel: Bool = false
     @Published public var currentSubtitle: SubtitleLine?
     @Published public var isGeneratingSubtitles: Bool = false
-    public var subtitles: [SubtitleLine] = []
+    @Published public var generatingSubtitleStatusText: String = ""
+    @Published public var subtitleErrorMessage: String? = nil
+    @Published public var subtitles: [SubtitleLine] = []
 
     // 无损剪辑模式
     @Published public var isClipMode: Bool = false
@@ -251,17 +253,29 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
-    public func generateAISubtitles() {
+    public func generateAISubtitles(sourceLanguage: String = "自动检测", targetLanguage: String = "zh") {
         guard let url = currentVideoURL else { return }
         Task {
             self.isGeneratingSubtitles = true
+            self.generatingSubtitleStatusText = "正在准备提取音轨..."
+            self.subtitleErrorMessage = nil
             do {
-                let lines = try await AISubtitleCoordinator.shared.processVideo(videoURL: url)
+                let lines = try await AISubtitleCoordinator.shared.processVideo(
+                    videoURL: url,
+                    targetLanguage: targetLanguage,
+                    sourceLanguage: sourceLanguage,
+                    onProgress: { [weak self] status in
+                        Task { @MainActor in
+                            self?.generatingSubtitleStatusText = status
+                        }
+                    }
+                )
                 self.subtitles = lines
                 self.isAISubtitleEnabled = true
                 self.updateActiveSubtitle(at: self.currentTime)
             } catch {
                 print("Generate subtitles failed: \(error)")
+                self.subtitleErrorMessage = error.localizedDescription
             }
             self.isGeneratingSubtitles = false
         }

@@ -66,56 +66,66 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         return nil
     }
 
-    /// 触发识别并翻译流程
+    /// 触发识别并翻译流程，完成之后自动将双语字幕持久化保存为该视频的本地离线 .srt 文件
     public func processVideo(
         videoURL: URL,
-        targetLanguage: String = "zh"
+        targetLanguage: String = "zh",
+        sourceLanguage: String = "自动检测",
+        onProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> [SubtitleLine] {
-        // 1. 优先检查本地同名 SRT
+        // 1. 优先检查本地是否已有已生成的同名 SRT（若有直接秒级装载离线字幕）
         if let existing = loadLocalSRTIfAvailable(for: videoURL) {
+            onProgress?("已加载本地离线字幕 (共 \(existing.count) 句)")
             return existing
         }
 
-        let apiKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+        // 2. 读取认证 Key（优先读取手动填写的 OpenAI Key，若无则读取已登录的 ChatGPT Plus/Pro 订阅 Token）
+        var activeToken = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+        if activeToken.isEmpty {
+            activeToken = await MainActor.run {
+                AuthManager.shared.currentProfile?.accessToken ?? ""
+            }.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
-        // 2. 如果配置了真实 OpenAI API Key，调用 Whisper API
-        if !apiKey.isEmpty {
-            let tempAudioURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
-            try await extractAudioTrack(from: videoURL, outputAudioURL: tempAudioURL)
-            let cloudService = CloudAISubtitleService(apiKey: apiKey)
-            let lines = try await cloudService.transcribeAndTranslate(audioURL: tempAudioURL, targetLanguage: targetLanguage)
+        // 3. 提取视频音轨
+        onProgress?("正在提取无损视频音轨...")
+        let tempAudioURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+        defer {
             try? FileManager.default.removeItem(at: tempAudioURL)
-            if !lines.isEmpty {
-                return lines
-            }
         }
+        try await extractAudioTrack(from: videoURL, outputAudioURL: tempAudioURL)
 
-        // 3. 本地兜底双语声纹字幕（保证哪怕断网/无 key 也能直观体验双语字幕）
-        let asset = AVURLAsset(url: videoURL)
-        var duration: TimeInterval = 60
-        if let dur = try? await asset.load(.duration) {
-            let sec = CMTimeGetSeconds(dur)
-            if sec.isFinite && sec > 0 {
-                duration = sec
-            }
-        }
+        // 4. 调用智能分片转录与大模型双语翻译
+        let cloudService = CloudAISubtitleService(apiKey: activeToken)
+        let lines = try await cloudService.transcribeAndTranslate(
+            audioURL: tempAudioURL,
+            targetLanguage: targetLanguage,
+            sourceLanguage: sourceLanguage,
+            onProgress: onProgress
+        )
 
-        var lines: [SubtitleLine] = []
-        var t: TimeInterval = 0.5
-        var index = 1
-        while t < duration && lines.count < 30 {
-            let end = min(duration, t + 4.0)
-            lines.append(
-                SubtitleLine(
-                    startTime: t,
-                    endTime: end,
-                    originalText: "Dialogue sequence [0\(index)]: Lovort High-Definition Audio",
-                    translatedText: "语音第 [0\(index)] 幕：Lovort 原画双语同步中"
-                )
+        guard !lines.isEmpty else {
+            throw NSError(
+                domain: "AISubtitleError",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "未检测到有效台词或大模型未返回结果，请确认视频包含清晰人声或检查网络代理"]
             )
-            t += 4.5
-            index += 1
         }
+
+        // 5. 自动持久化落盘为视频同级 .srt 离线字幕文件（这样观影时无需联网即开即显！）
+        let srtContent = SRTParser.generateSRT(from: lines)
+        let targetSRTURL = videoURL.deletingPathExtension().appendingPathExtension("srt")
+        do {
+            try srtContent.write(to: targetSRTURL, atomically: true, encoding: .utf8)
+            onProgress?("✅ 已生成并保存离线字幕 (共 \(lines.count) 句)")
+        } catch {
+            // 若原目录受沙盒只读限制，保存到 Documents 目录
+            let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let fallbackSRTURL = docsDir.appendingPathComponent(videoURL.deletingPathExtension().lastPathComponent).appendingPathExtension("srt")
+            try? srtContent.write(to: fallbackSRTURL, atomically: true, encoding: .utf8)
+            onProgress?("✅ 已保存离线字幕到本地 (共 \(lines.count) 句)")
+        }
+
         return lines
     }
 }

@@ -33,38 +33,144 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
         return URLSession(configuration: config)
     }
 
-    public func transcribeAndTranslate(audioURL: URL, targetLanguage: String = "zh") async throws -> [SubtitleLine] {
+    public func transcribeAndTranslate(audioURL: URL, targetLanguage: String) async throws -> [SubtitleLine] {
+        try await transcribeAndTranslate(audioURL: audioURL, targetLanguage: targetLanguage, sourceLanguage: "自动检测", onProgress: nil)
+    }
+
+    public func transcribeAndTranslate(
+        audioURL: URL,
+        targetLanguage: String = "zh",
+        sourceLanguage: String = "自动检测",
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> [SubtitleLine] {
         var parsedLines: [SubtitleLine] = []
 
-        // 1. 如果是 sk- 开头的 OpenAI Platform Key，优先走 Whisper API；如果是 ChatGPT OAuth 订阅 Token 或 Whisper 失败，走 iOS 原生语音识别提取时间轴文本
-        if apiKey.hasPrefix("sk-"), let srtText = try? await requestWhisperTranscription(audioURL: audioURL) {
-            parsedLines = SRTParser.parse(srtString: srtText)
+        // 1. 如果是 sk- 开头的 OpenAI Platform Key，优先尝试 Whisper API
+        if apiKey.hasPrefix("sk-") {
+            onProgress?("正在调用 Whisper API 进行语音转录...")
+            if let srtText = try? await requestWhisperTranscription(audioURL: audioURL) {
+                parsedLines = SRTParser.parse(srtString: srtText)
+            }
         }
 
+        // 2. 若未走 Whisper 或 Whisper 失败，使用高精度分片语音识别（突破 1 分钟限制，支持任意长视频）
         if parsedLines.isEmpty {
-            parsedLines = await transcribeWithAppleSpeech(audioURL: audioURL)
+            onProgress?("正在使用原生语音引擎分片识别长音轨...")
+            parsedLines = await transcribeWithAppleSpeechChunked(audioURL: audioURL, sourceLanguage: sourceLanguage, onProgress: onProgress)
         }
 
-        if parsedLines.isEmpty {
-            return []
+        guard !parsedLines.isEmpty else {
+            throw NSError(domain: "AISubtitleError", code: -10, userInfo: [NSLocalizedDescriptionKey: "未能从音轨中检测到清晰语音台词，请确认视频包含人声"])
         }
 
-        // 2. 将转录文字传给 GPT (支持 ChatGPT Plus/Pro OAuth 订阅通道与 API Key 通道) 做上下文翻译
+        // 3. 将转录文字传给 GPT (支持 ChatGPT Plus/Pro OAuth 订阅通道与 API Key 通道) 做上下文双语翻译润色
+        onProgress?("正在调用 GPT 订阅大模型进行双语润色与对齐 (共 \(parsedLines.count) 句)...")
         let translatedLines = try await requestTranslation(lines: parsedLines, targetLanguage: targetLanguage)
         return translatedLines
     }
 
-    /// 使用 iOS 原生 Speech 框架识别提取出的 m4a 音轨（无需消耗 Whisper API 余额，配合 ChatGPT OAuth 翻译）
-    private func transcribeWithAppleSpeech(audioURL: URL) async -> [SubtitleLine] {
+    /// 长音频分片转录（按 35 秒为一段依次切割音频，绕过 iOS 系统的 1 分钟限制，支持几小时长视频）
+    private func transcribeWithAppleSpeechChunked(
+        audioURL: URL,
+        sourceLanguage: String,
+        onProgress: (@Sendable (String) -> Void)?
+    ) async -> [SubtitleLine] {
         let authorized = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status == .authorized)
             }
         }
-        guard authorized, let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
-            return []
+        guard authorized else { return [] }
+
+        let asset = AVURLAsset(url: audioURL)
+        var totalDuration: TimeInterval = 0
+        if let dur = try? await asset.load(.duration) {
+            let sec = CMTimeGetSeconds(dur)
+            if sec.isFinite && sec > 0 {
+                totalDuration = sec
+            }
         }
 
+        guard totalDuration > 0 else { return [] }
+
+        // 选择最佳语言 Locale
+        var locale = Locale(identifier: "zh-CN")
+        if sourceLanguage.contains("英") || sourceLanguage.lowercased().contains("en") {
+            locale = Locale(identifier: "en-US")
+        } else if sourceLanguage.contains("日") || sourceLanguage.lowercased().contains("ja") {
+            locale = Locale(identifier: "ja-JP")
+        } else if let sysLocale = SFSpeechRecognizer.supportedLocales().first(where: { $0.identifier == Locale.current.identifier }) {
+            locale = sysLocale
+        }
+
+        let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
+        guard let recognizer = recognizer, recognizer.isAvailable else { return [] }
+
+        // 如果时长小于 45 秒，直接单次识别
+        if totalDuration <= 45.0 {
+            return await recognizeSingleAudioClip(audioURL: audioURL, recognizer: recognizer, timeOffset: 0)
+        }
+
+        // 长音频按 35 秒切片依次识别
+        let sliceDuration: TimeInterval = 35.0
+        var currentStart: TimeInterval = 0
+        var allLines: [SubtitleLine] = []
+        let totalSlices = Int(ceil(totalDuration / sliceDuration))
+        var sliceIndex = 1
+
+        while currentStart < totalDuration {
+            let thisDuration = min(sliceDuration, totalDuration - currentStart)
+            onProgress?("正在语音识别分片 (\(sliceIndex)/\(totalSlices))...")
+
+            let sliceURL = FileManager.default.temporaryDirectory.appendingPathComponent("slice_\(UUID().uuidString).m4a")
+            let exportSuccess = await exportAudioSlice(
+                asset: asset,
+                from: currentStart,
+                duration: thisDuration,
+                outputURL: sliceURL
+            )
+
+            if exportSuccess {
+                let sliceLines = await recognizeSingleAudioClip(
+                    audioURL: sliceURL,
+                    recognizer: recognizer,
+                    timeOffset: currentStart
+                )
+                allLines.append(contentsOf: sliceLines)
+                try? FileManager.default.removeItem(at: sliceURL)
+            }
+
+            currentStart += thisDuration
+            sliceIndex += 1
+        }
+
+        return allLines
+    }
+
+    /// 截取音频的一个短分片
+    private func exportAudioSlice(asset: AVURLAsset, from startSec: TimeInterval, duration durSec: TimeInterval, outputURL: URL) async -> Bool {
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            return false
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(
+            start: CMTime(seconds: startSec, preferredTimescale: 600),
+            duration: CMTime(seconds: durSec, preferredTimescale: 600)
+        )
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        await exportSession.export()
+        return exportSession.status == .completed
+    }
+
+    /// 识别单个短音频片段并映射全局时间戳
+    private func recognizeSingleAudioClip(
+        audioURL: URL,
+        recognizer: SFSpeechRecognizer,
+        timeOffset: TimeInterval
+    ) async -> [SubtitleLine] {
         let request = SFSpeechURLRecognitionRequest(url: audioURL)
         request.shouldReportPartialResults = false
 
@@ -85,12 +191,12 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
 
                     for segment in result.bestTranscription.segments {
                         if currentText.isEmpty {
-                            chunkStart = segment.timestamp
+                            chunkStart = timeOffset + segment.timestamp
                         }
                         currentText += (currentText.isEmpty ? "" : " ") + segment.substring
-                        lastEnd = segment.timestamp + segment.duration
+                        lastEnd = timeOffset + segment.timestamp + segment.duration
 
-                        if currentText.count >= 36 || segment.substring.hasSuffix(".") || segment.substring.hasSuffix("?") || segment.substring.hasSuffix("!") || (lastEnd - chunkStart) >= 4.5 {
+                        if currentText.count >= 32 || segment.substring.hasSuffix(".") || segment.substring.hasSuffix("?") || segment.substring.hasSuffix("!") || segment.substring.hasSuffix("。") || segment.substring.hasSuffix("？") || (lastEnd - chunkStart) >= 4.0 {
                             lines.append(
                                 SubtitleLine(
                                     startTime: chunkStart,
@@ -106,7 +212,7 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
                         lines.append(
                             SubtitleLine(
                                 startTime: chunkStart,
-                                endTime: max(chunkStart + 1.5, lastEnd),
+                                endTime: max(chunkStart + 1.2, lastEnd),
                                 originalText: currentText,
                                 translatedText: ""
                             )

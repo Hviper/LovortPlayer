@@ -41,4 +41,30 @@ public struct SRTParser {
               let seconds = Double(parts[2]) else { return 0 }
         return hours * 3600 + minutes * 60 + seconds
     }
+
+    /// 将字幕数组序列化为标准 SRT 字符串（支持双语显示）
+    public static func generateSRT(from lines: [SubtitleLine]) -> String {
+        var srt = ""
+        for (index, line) in lines.enumerated() {
+            let start = formatTimestamp(line.startTime)
+            let end = formatTimestamp(line.endTime)
+            srt += "\(index + 1)\n"
+            srt += "\(start) --> \(end)\n"
+            if let trans = line.translatedText, !trans.isEmpty {
+                srt += "\(line.originalText)\n\(trans)\n\n"
+            } else {
+                srt += "\(line.originalText)\n\n"
+            }
+        }
+        return srt
+    }
+
+    private static func formatTimestamp(_ seconds: TimeInterval) -> String {
+        let totalMs = Int(max(0, seconds) * 1000)
+        let hrs = totalMs / 3600000
+        let mins = (totalMs % 3600000) / 60000
+        let secs = (totalMs % 60000) / 1000
+        let ms = totalMs % 1000
+        return String(format: "%02d:%02d:%02d,%03d", hrs, mins, secs, ms)
+    }
 }
