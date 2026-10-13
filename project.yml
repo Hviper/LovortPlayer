@@ -7,10 +7,10 @@ options:
 packages:
   libdav1d:
     url: https://github.com/SDWebImage/libdav1d-Xcode.git
-    exact: "1.1.0"
+    exactVersion: "1.1.0"
   whisperkit:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
-    exact: "1.1.1"
+    exactVersion: "1.1.1"
 targets:
   LovortPlayer:
     type: application
