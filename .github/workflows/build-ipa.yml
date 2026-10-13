@@ -37,6 +37,12 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            SWIFT_COMPILATION_MODE=wholemodule \
+            DEAD_CODE_STRIPPING=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            STRIP_SWIFT_SYMBOLS=YES \
+            DEPLOYMENT_POSTPROCESSING=YES \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             CONFIGURATION_BUILD_DIR=build/Release-iphoneos
 
       - name: Package to IPA
@@ -44,6 +50,9 @@ jobs:
           mkdir -p Payload
           cp -r build/Release-iphoneos/LovortPlayer.app Payload/
           zip -r LovortPlayer.ipa Payload
+          # 打包 dSYM 供崩溃符号化
+          zip -r LovortPlayer.dSYM.zip build/Release-iphoneos/LovortPlayer.app.dSYM 2>/dev/null || true
+          echo "IPA size: $(du -sh LovortPlayer.ipa | cut -f1)"
           echo "IPA packaging completed successfully."
 
       - name: Upload IPA Artifact
@@ -51,6 +60,13 @@ jobs:
         with:
           name: LovortPlayer-IPA
           path: LovortPlayer.ipa
+          retention-days: 7
+
+      - name: Upload dSYM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LovortPlayer-dSYM
+          path: LovortPlayer.dSYM.zip
           retention-days: 7
 
       - name: Auto Publish to Releases
