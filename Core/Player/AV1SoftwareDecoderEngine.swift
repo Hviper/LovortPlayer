@@ -6,6 +6,12 @@ import CoreGraphics
 import VideoToolbox
 import libdav1d
 
+// SDWebImage/libdav1d-Xcode 移除了 dav1d/src/arm 目录（CONFIG_ASM=0），但 dav1d/src/cpu.c 在 arm64 下仍会调用 dav1d_get_cpu_flags_arm
+@_cdecl("dav1d_get_cpu_flags_arm")
+public func dav1d_get_cpu_flags_arm() -> UInt32 {
+    return 0
+}
+
 public struct MP4AV1Sample: Sendable {
     public let offset: UInt64
     public let size: UInt32
