@@ -9,8 +9,10 @@ public struct AISubtitleSettingsSheet: View {
     @State private var apiKey: String = ""
     @State private var proxyHost: String = ""
     @State private var proxyPort: String = ""
-    @State private var selectedSourceLanguage: String = "日语 (日本語 - 动漫/日剧)"
+    @State private var selectedSourceLanguage: SubtitleSourceLanguage = .japanese
     @State private var selectedTargetLanguage: String = "中文 (简体)"
+    @State private var selectedEngine: AISubtitleEngineType = AISubtitleCoordinator.shared.currentEngine
+    @State private var selectedOfflineModel: OfflineWhisperModel = AISubtitleCoordinator.shared.offlineModel
     @State private var isLoggingIn: Bool = false
     @State private var loginMessage: String? = nil
     @State private var communityMatchStatus: String = ""
@@ -87,7 +89,7 @@ public struct AISubtitleSettingsSheet: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.6))
                 Spacer()
-                if let profile = authManager.currentProfile, profile.isLoggedIn {
+                if let profile = authManager.currentProfile, profile.isLoggedIn, profile.canUseChatGPTPlan {
                     HStack(spacing: 4) {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
                         Text("已认证")
@@ -100,14 +102,14 @@ public struct AISubtitleSettingsSheet: View {
                 }
             }
 
-            if let profile = authManager.currentProfile, profile.isLoggedIn {
+            if let profile = authManager.currentProfile, profile.isLoggedIn, profile.canUseChatGPTPlan {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(profile.email)
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(.white)
-                            Text("ChatGPT Plus / Pro 订阅会员")
+                            Text("ChatGPT 计划使用权限已启用")
                                 .font(.system(size: 12))
                                 .foregroundColor(AppSettings.shared.themeColor.color)
                         }
@@ -137,7 +139,7 @@ public struct AISubtitleSettingsSheet: View {
                             Image(systemName: "bolt.fill")
                                 .font(.system(size: 11))
                                 .foregroundColor(.yellow)
-                            Text("离线赋能：支持为任意本地无字幕长视频离线批量预生成字幕")
+                            Text("ChatGPT 仅用于联网翻译；原文转写可由 WhisperKit 完全离线完成")
                                 .font(.system(size: 11))
                                 .foregroundColor(.white.opacity(0.55))
                         }
@@ -145,7 +147,7 @@ public struct AISubtitleSettingsSheet: View {
                 }
             } else {
                 VStack(spacing: 12) {
-                    Text("登录您的 ChatGPT 订阅账户即可借助 GPT-4o 大模型能力为本地无字幕视频一键预生成高精度双语字幕。")
+                    Text("连接符合条件的 ChatGPT Plus / Pro 账户并授权计划使用后，可将设备端生成的原文字幕联网翻译为双语字幕。")
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.6))
                         .fixedSize(horizontal: false, vertical: true)
@@ -157,7 +159,7 @@ public struct AISubtitleSettingsSheet: View {
                             } else {
                                 Image(systemName: "safari.fill")
                             }
-                            Text("通过系统 Safari 登录 ChatGPT 订阅")
+                            Text("使用 ChatGPT 继续")
                                 .font(.system(size: 13, weight: .semibold))
                         }
                         .foregroundColor(.white)
@@ -297,10 +299,64 @@ public struct AISubtitleSettingsSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 支持【社区字幕组精校库】秒级免额度匹配，以及借助【GPT-6 / GPT-5.6】大模型离线提取完整音轨并生成动漫级双语对齐字幕。生成后永久缓存在本地，观影即开即显！")
+            Text("💡 WhisperKit 在设备端生成带时间轴的原文字幕；模型首次使用需联网下载，之后可完全离线转写。中文翻译需要 ChatGPT 登录或 API Key，生成结果会永久缓存在本地。")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("转写方式")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.45))
+                Picker("转写方式", selection: $selectedEngine) {
+                    Text(AISubtitleEngineType.localWhisperKit.displayName)
+                        .tag(AISubtitleEngineType.localWhisperKit)
+                    Text(AISubtitleEngineType.cloudOpenAI.displayName)
+                        .tag(AISubtitleEngineType.cloudOpenAI)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if selectedEngine == .localWhisperKit {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("离线模型")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.45))
+                    Menu {
+                        ForEach(OfflineWhisperModel.allCases) { model in
+                            Button {
+                                selectedOfflineModel = model
+                            } label: {
+                                if selectedOfflineModel == model {
+                                    Label(model.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(model.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(selectedOfflineModel.displayName)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text(selectedOfflineModel.detail)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.white.opacity(0.48))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .foregroundColor(AppSettings.shared.themeColor.color)
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+                    }
+                }
+            } else {
+                Text("云端转写会按 4 分钟自动切片，避免 OpenAI 单文件 25 MB 限制；必须填写 Platform API Key。")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange.opacity(0.8))
+            }
 
             // 语言选择
             HStack(spacing: 12) {
@@ -308,12 +364,10 @@ public struct AISubtitleSettingsSheet: View {
                     Text("原声音频语言")
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.45))
-                    Menu(selectedSourceLanguage) {
-                        Button("日语 (日本語 - 动漫/日剧)") { selectedSourceLanguage = "日语 (日本語 - 动漫/日剧)" }
-                        Button("英语 (English - 欧美影视)") { selectedSourceLanguage = "英语 (English - 欧美影视)" }
-                        Button("中文 (普通话/粤语)") { selectedSourceLanguage = "中文 (普通话/粤语)" }
-                        Button("韩语 (한국어)") { selectedSourceLanguage = "韩语 (한국어)" }
-                        Button("自动智能检测") { selectedSourceLanguage = "自动智能检测" }
+                    Menu(selectedSourceLanguage.displayName) {
+                        ForEach(SubtitleSourceLanguage.allCases) { language in
+                            Button(language.displayName) { selectedSourceLanguage = language }
+                        }
                     }
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(AppSettings.shared.themeColor.color)
@@ -363,7 +417,9 @@ public struct AISubtitleSettingsSheet: View {
                 Button(action: {
                     viewModel.generateAISubtitles(
                         sourceLanguage: selectedSourceLanguage,
-                        targetLanguage: selectedTargetLanguage
+                        targetLanguage: selectedTargetLanguage,
+                        engine: selectedEngine,
+                        offlineModel: selectedOfflineModel
                     )
                 }) {
                     HStack(spacing: 8) {
@@ -380,7 +436,7 @@ public struct AISubtitleSettingsSheet: View {
                                 .font(.system(size: 14, weight: .semibold))
                         } else {
                             Image(systemName: "sparkles")
-                            Text("一键为该视频生成离线 AI 双语字幕")
+                            Text(selectedEngine == .localWhisperKit ? "离线生成原文并翻译为双语字幕" : "云端生成并翻译为双语字幕")
                                 .font(.system(size: 14, weight: .semibold))
                         }
                     }

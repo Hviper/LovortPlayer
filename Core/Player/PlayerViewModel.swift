@@ -48,10 +48,18 @@ public final class PlayerViewModel: ObservableObject {
     @Published public private(set) var currentVideoURL: URL?
     private var timeObserverToken: Any?
     private var controlsHideTimer: Task<Void, Never>?
+    private var subtitleGenerationTask: Task<Void, Never>?
 
     public init() {}
 
     public func loadVideo(url: URL) {
+        subtitleGenerationTask?.cancel()
+        subtitleGenerationTask = nil
+        isGeneratingSubtitles = false
+        generatingSubtitleStatusText = ""
+        subtitleErrorMessage = nil
+        subtitles = []
+        currentSubtitle = nil
         self.currentVideoURL = url
         resetControlsTimeout()
 
@@ -253,9 +261,16 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
-    public func generateAISubtitles(sourceLanguage: String = "自动检测", targetLanguage: String = "zh") {
+    public func generateAISubtitles(
+        sourceLanguage: SubtitleSourceLanguage = .automatic,
+        targetLanguage: String = "中文 (简体)",
+        engine: AISubtitleEngineType = .localWhisperKit,
+        offlineModel: OfflineWhisperModel = .highAccuracy
+    ) {
         guard let url = currentVideoURL else { return }
-        Task {
+        subtitleGenerationTask?.cancel()
+        subtitleGenerationTask = Task { [weak self] in
+            guard let self else { return }
             self.isGeneratingSubtitles = true
             self.generatingSubtitleStatusText = "正在准备提取音轨..."
             self.subtitleErrorMessage = nil
@@ -264,20 +279,30 @@ public final class PlayerViewModel: ObservableObject {
                     videoURL: url,
                     targetLanguage: targetLanguage,
                     sourceLanguage: sourceLanguage,
+                    engine: engine,
+                    model: offlineModel,
+                    forceRegenerate: true,
                     onProgress: { [weak self] status in
                         Task { @MainActor in
-                            self?.generatingSubtitleStatusText = status
+                            guard let self, self.currentVideoURL == url else { return }
+                            self.generatingSubtitleStatusText = status
                         }
                     }
                 )
+                try Task.checkCancellation()
+                guard self.currentVideoURL == url else { return }
                 self.subtitles = lines
                 self.isAISubtitleEnabled = true
                 self.updateActiveSubtitle(at: self.currentTime)
             } catch {
+                guard !Task.isCancelled, self.currentVideoURL == url else { return }
                 print("Generate subtitles failed: \(error)")
                 self.subtitleErrorMessage = error.localizedDescription
             }
-            self.isGeneratingSubtitles = false
+            if self.currentVideoURL == url {
+                self.isGeneratingSubtitles = false
+                self.subtitleGenerationTask = nil
+            }
         }
     }
 

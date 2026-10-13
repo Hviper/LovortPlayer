@@ -14,7 +14,7 @@
 | **无损剪辑** | GOP Passthrough 剪裁 | ✅ 已完成 | `Core/Clip/LosslessClipManager.swift`<br>`Views/Player/InPlayerClipBar.swift` | 播放内标记 In/Out 毫秒点，秒级无损码流复制导出 |
 | **局域网直传** | HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 手机内嵌 Web Server，PC 浏览器拖拽即可上传大视频 |
 | **媒体库** | 16:9 卡片瀑布流 | ✅ 已完成 | `Views/Main/MediaLibraryHomeView.swift`<br>`Views/Main/VideoCardView.swift` | 封面卡片流、时长/分辨率标签、分类 Tabs |
-| **AI 字幕引擎** | SRT 解析 + 翻译流水线 | 🟡 基础框架完成 | `Core/AISubtitle/SRTParser.swift`<br>`Core/AISubtitle/CloudAISubtitleService.swift` | 数据流已打通，下一步待注入真实 Whisper/GPT API Key 调试 |
+| **AI 字幕引擎** | 离线转写 + 分批翻译 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/CloudAISubtitleService.swift` | WhisperKit 设备端转写、VAD 与时间戳；GPT 分批结构化翻译；双语 JSON/SRT 缓存 |
 | **认证授权** | Keychain + OAuth PKCE | 🟡 基础框架完成 | `Core/Auth/AuthManager.swift` | Keychain 安全存取已就绪，待对接 Antigravity/ChatGPT 登录端点 |
 | **CI / CD** | GitHub Actions 自动打包 | ✅ 已完成 | `.github/workflows/build-ipa.yml` | 提交代码自动触发云端 macOS 构建并发布到 Releases |
 
@@ -50,7 +50,7 @@
 
 ## 🛠️ 下一步开发计划 (Next Steps)
 
-1. **真实 AI 字幕联调**：在 `CloudAISubtitleService.swift` 中配置真实 OpenAI Whisper API 或 Antigravity 接口，跑通真实音轨抽取与双语字幕渲染。
+1. **真实影片回归集**：用日语动漫、英语美剧和多人对白样本持续评估字错率、时间轴和翻译一致性。
 2. **多格式解码增强**：集成 FFmpeg 软解模块，扩充对高规格原生 MKV / FLAC 音轨的原生播放支持。
 3. **局域网分片续传**：优化 `LANServerManager.swift` 中超大文件（如 4K 10GB+）的断点续传机制。
 
@@ -64,6 +64,14 @@ git clone https://github.com/Hviper/LovortPlayer.git
 cd LovortPlayer
 ```
 - **查看交互效果**：直接双击 `docs/Interactive_Prototype.html` 在浏览器中即可体验高保真完整原型。
-- **本地编译验证**：`swift build`（只要有 CommandLineTools 即可编译通过）。
+- **本地编译验证**：需要完整 Xcode（WhisperKit 使用 Core ML）；运行 `xcodegen generate` 后用 Xcode 或 `xcodebuild` 构建。
 - **生成 Xcode 工程**：如果有安装 Xcode，运行 `brew install xcodegen && xcodegen generate` 即可生成 `LovortPlayer.xcodeproj`。
 - **发布更新**：直接 `git push`，云端 GitHub Actions 会自动打包出最新的 `.ipa` 安装包并更新到 Releases。
+
+## 🎬 离线字幕工作方式
+
+1. 在播放器的“AI 字幕选项”中选择“离线 WhisperKit”。
+2. 首次选择模型时需要联网下载 Core ML 模型；下载完成后，音频提取和原文转写无需联网。
+3. “高精度”模型适合日语动漫和影视；旧设备可选择 Small 或 Base 降低内存占用。
+4. 若已登录 ChatGPT 或填写 OpenAI API Key，转写后会联网分批翻译；没有凭据时仍会保存可离线观看的原文字幕。
+5. 双语结果同时写入 `.lovort-subtitles.json`（保留原文/译文结构）和标准 `.srt`。云端 Whisper 选项会自动按 4 分钟切片，规避 25 MB 单文件限制。

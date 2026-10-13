@@ -142,38 +142,14 @@ public final class AIModelManager: ObservableObject {
         }
         let session = URLSession(configuration: config)
 
-        // 提取 chatgpt-account-id
-        var accountID: String? = nil
-        let segments = token.components(separatedBy: ".")
-        if segments.count > 1 {
-            var b64 = segments[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            while b64.count % 4 != 0 { b64.append("=") }
-            if let d = Data(base64Encoded: b64),
-               let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-               let authClaim = json["https://api.openai.com/auth"] as? [String: Any] {
-                accountID = authClaim["chatgpt_account_id"] as? String
-            }
-        }
-
-        var candidateURLs: [URL] = []
-        if token.hasPrefix("sk-") {
-            if let u = URL(string: "https://api.openai.com/v1/models") { candidateURLs.append(u) }
-        } else {
-            // ChatGPT OAuth / 订阅接口
-            if let u1 = URL(string: "https://chatgpt.com/backend-api/models?history_and_training_disabled=false") { candidateURLs.append(u1) }
-            if let u2 = URL(string: "https://chatgpt.com/backend-api/models") { candidateURLs.append(u2) }
-            if let u3 = URL(string: "https://api.openai.com/v1/models") { candidateURLs.append(u3) }
-        }
+        // OpenAI Platform Key 与 ChatGPT 计划 OAuth Token 都使用公开模型目录。
+        let candidateURLs = [URL(string: "https://api.openai.com/v1/models")].compactMap { $0 }
 
         var fetchedIDs: [String] = []
 
         for url in candidateURLs {
             var request = URLRequest(url: url)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            if let accountID = accountID {
-                request.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
-            }
-
             if let (data, response) = try? await session.data(for: request),
                let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

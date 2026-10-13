@@ -1,8 +1,11 @@
-import Foundation
-import Security
-import CryptoKit
-import Network
 import AuthenticationServices
+import CryptoKit
+import Foundation
+import Network
+import Security
+#if os(iOS)
+import UIKit
+#endif
 
 public enum AuthProvider: String, Codable, Sendable {
     case chatgpt
@@ -16,21 +19,49 @@ public struct UserAuthProfile: Codable, Sendable {
     public var refreshToken: String?
     public var quotaRemaining: String
     public var isLoggedIn: Bool
+    public var clientID: String?
+    public var idToken: String?
+    public var scopes: [String]?
+    public var expiresAt: Date?
+
+    public var canUseChatGPTPlan: Bool {
+        scopes?.contains("chatgpt.tokens.use.direct") == true
+    }
 }
 
 @MainActor
 public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     public static let shared = AuthManager()
 
-    private let profileKey = "LovortUserProfileData"
-    @Published public var currentProfile: UserAuthProfile?
+    private struct OAuthCallback: Sendable {
+        let code: String?
+        let state: String?
+        let clientID: String?
+        let error: String?
+    }
 
-    // 参考 pi-coding-agent / OpenAI Codex 官方注册的 Public Client 配置
-    private let openAIAuthorizeURL = "https://auth.openai.com/oauth/authorize"
-    private let openAITokenURL = "https://auth.openai.com/oauth/token"
-    private let codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-    private let codexRedirectURI = "http://localhost:1455/auth/callback"
+    private struct TokenResult: Sendable {
+        let accessToken: String
+        let refreshToken: String?
+        let idToken: String
+        let scopes: [String]
+        let expiresAt: Date
+        let email: String
+    }
+
+    private let profileKey = "LovortUserProfileData"
+    private let keychainService = "com.hviper.lovortplayer.chatgpt"
+    private let hostIDKey = "LovortChatGPTHostID"
+    private let authorizeURL = "https://auth.openai.com/api/accounts/authorize"
+    private let tokenURL = "https://auth.openai.com/api/accounts/oauth/token"
+    private let resource = "https://api.openai.com/v1"
+    private let redirectURI = "http://127.0.0.1:1455/auth/callback"
+    private let dynamicClientID = "dynamic_agent_client"
+
+    @Published public var currentProfile: UserAuthProfile?
     private var localCallbackServer: NWListener?
+    private var activeAuthSession: ASWebAuthenticationSession?
+    private var isAuthResumed = false
 
     private override init() {
         super.init()
@@ -38,174 +69,246 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
     }
 
     private func loadProfile() {
-        if let data = UserDefaults.standard.data(forKey: profileKey),
+        if let data = readProfileFromKeychain(),
            let profile = try? JSONDecoder().decode(UserAuthProfile.self, from: data) {
-            self.currentProfile = profile
+            currentProfile = profile
+            return
         }
-    }
-
-    public func saveProfile(_ profile: UserAuthProfile?) {
-        self.currentProfile = profile
-        if let profile = profile, let data = try? JSONEncoder().encode(profile) {
-            UserDefaults.standard.set(data, forKey: profileKey)
-            if !profile.accessToken.isEmpty {
-                AISubtitleCoordinator.shared.saveOpenAIKey(profile.accessToken)
-            }
-        } else {
+        if let legacyData = UserDefaults.standard.data(forKey: profileKey),
+           let profile = try? JSONDecoder().decode(UserAuthProfile.self, from: legacyData) {
+            currentProfile = profile
+            clearLegacyOAuthToken(matching: profile.accessToken)
+            saveProfile(profile)
             UserDefaults.standard.removeObject(forKey: profileKey)
         }
     }
 
-    // MARK: - PKCE 生成辅助函数
+    public func saveProfile(_ profile: UserAuthProfile?) {
+        currentProfile = profile
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: profileKey
+        ]
+        SecItemDelete(query as CFDictionary)
+        guard let profile, let data = try? JSONEncoder().encode(profile) else { return }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(item as CFDictionary, nil)
+    }
+
+    private func readProfileFromKeychain() -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: profileKey,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    private func hostID() -> String {
+        if let saved = UserDefaults.standard.string(forKey: hostIDKey), !saved.isEmpty { return saved }
+        let value = "urn:uuid:\(UUID().uuidString.lowercased())"
+        UserDefaults.standard.set(value, forKey: hostIDKey)
+        return value
+    }
+
     private func generateCodeVerifier() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        return Data(bytes).base64URLEncodedString()
     }
 
     private func generateCodeChallenge(from verifier: String) -> String {
-        let data = Data(verifier.utf8)
-        let hash = SHA256.hash(data: data)
-        return Data(hash).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
     }
 
-    private var activeAuthSession: ASWebAuthenticationSession?
-    private var isAuthResumed: Bool = false
-
-    /// 完整复刻 pi-coding-agent 的 OpenAI Codex PKCE + localhost:1455 环回监听登录流
     public func startWebAuthLogin(provider: AuthProvider) async throws -> UserAuthProfile {
-        if provider == .antigravity {
-            return try await startAntigravityLogin()
-        }
+        if provider == .antigravity { return try await startAntigravityLogin() }
 
         let verifier = generateCodeVerifier()
         let challenge = generateCodeChallenge(from: verifier)
         let state = UUID().uuidString
+        let nonce = UUID().uuidString
+        let savedClientID = currentProfile?.provider == .chatgpt ? currentProfile?.clientID : nil
+        let pendingClientID = savedClientID ?? dynamicClientID
 
-        var components = URLComponents(string: openAIAuthorizeURL)!
-        components.queryItems = [
+        var components = URLComponents(string: authorizeURL)!
+        var queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "client_id", value: codexClientID),
-            URLQueryItem(name: "redirect_uri", value: codexRedirectURI),
-            URLQueryItem(name: "scope", value: "openid profile email offline_access"),
+            URLQueryItem(name: "client_id", value: pendingClientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "scope", value: "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"),
+            URLQueryItem(name: "resource", value: resource),
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
-            URLQueryItem(name: "id_token_add_organizations", value: "true"),
-            URLQueryItem(name: "codex_cli_simplified_flow", value: "true"),
-            URLQueryItem(name: "originator", value: "pi")
+            URLQueryItem(name: "nonce", value: nonce),
+            URLQueryItem(name: "ext_agent_host_id", value: hostID())
         ]
-
-        guard let authURL = components.url else {
-            throw NSError(domain: "AuthError", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的授权地址"])
+        if pendingClientID == dynamicClientID {
+            queryItems.append(URLQueryItem(name: "agent_name_hint", value: "LovortPlayer"))
+        } else {
+            if let idToken = currentProfile?.idToken {
+                queryItems.append(URLQueryItem(name: "id_token_hint", value: idToken))
+            }
+            if let email = currentProfile?.email, !email.isEmpty {
+                queryItems.append(URLQueryItem(name: "login_hint", value: email))
+            }
         }
+        components.queryItems = queryItems
+        guard let authURL = components.url else { throw authError("无法生成 ChatGPT 授权地址") }
 
         isAuthResumed = false
-
         return try await withCheckedThrowingContinuation { continuation in
-            // 1. 启动本地 127.0.0.1:1455 监听接收 OpenAI 回调的 ?code=...
-            self.startLocalLoopbackServer(port: 1455) { [weak self] code in
+            startLocalLoopbackServer(port: 1455) { [weak self] callback in
                 Task { @MainActor in
-                    guard let self = self, !self.isAuthResumed else { return }
+                    guard let self, !self.isAuthResumed else { return }
                     self.isAuthResumed = true
                     self.activeAuthSession?.cancel()
                     self.activeAuthSession = nil
                     self.stopLocalLoopbackServer()
-
-                    // 拿到授权 code 后向 OpenAI 换取真实 Access Token
-                    let tokenResult = await self.exchangeCodeForToken(code: code, verifier: verifier)
-                    let profile = UserAuthProfile(
-                        provider: .chatgpt,
-                        email: tokenResult.email,
-                        accessToken: tokenResult.accessToken,
-                        refreshToken: tokenResult.refreshToken,
-                        quotaRemaining: "已激活 ChatGPT Plus/Pro 订阅额度",
-                        isLoggedIn: true
-                    )
-                    self.saveProfile(profile)
-                    continuation.resume(returning: profile)
-                }
-            }
-
-            // 2. 拉起系统认证浏览器页
-            let session = ASWebAuthenticationSession(
-                url: authURL,
-                callbackURLScheme: "lovortplayer"
-            ) { [weak self] callbackURL, error in
-                Task { @MainActor in
-                    guard let self = self, !self.isAuthResumed else { return }
-                    self.isAuthResumed = true
-                    self.activeAuthSession = nil
-                    self.stopLocalLoopbackServer()
-
-                    if let callbackURL = callbackURL,
-                       let comps = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
-                       let code = comps.queryItems?.first(where: { $0.name == "code" })?.value {
-                        let tokenResult = await self.exchangeCodeForToken(code: code, verifier: verifier)
-                        let profile = UserAuthProfile(
-                            provider: .chatgpt,
-                            email: tokenResult.email,
-                            accessToken: tokenResult.accessToken,
-                            refreshToken: tokenResult.refreshToken,
-                            quotaRemaining: "已激活 ChatGPT Plus/Pro 订阅额度",
-                            isLoggedIn: true
+                    do {
+                        let profile = try await self.finishLogin(
+                            callback: callback,
+                            expectedState: state,
+                            pendingClientID: pendingClientID,
+                            verifier: verifier,
+                            nonce: nonce
                         )
-                        self.saveProfile(profile)
                         continuation.resume(returning: profile)
-                        return
-                    }
-
-                    if let error = error {
+                    } catch {
                         continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume(throwing: NSError(domain: "AuthError", code: -2, userInfo: [NSLocalizedDescriptionKey: "未获取到授权码"]))
                     }
                 }
             }
 
-            self.activeAuthSession = session
+            let session = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "lovortplayer") { [weak self] callbackURL, error in
+                Task { @MainActor in
+                    guard let self, !self.isAuthResumed else { return }
+                    if let callbackURL {
+                        self.isAuthResumed = true
+                        self.stopLocalLoopbackServer()
+                        self.activeAuthSession = nil
+                        do {
+                            let profile = try await self.finishLogin(
+                                callback: Self.parseCallback(url: callbackURL),
+                                expectedState: state,
+                                pendingClientID: pendingClientID,
+                                verifier: verifier,
+                                nonce: nonce
+                            )
+                            continuation.resume(returning: profile)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else if let error {
+                        self.isAuthResumed = true
+                        self.stopLocalLoopbackServer()
+                        self.activeAuthSession = nil
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+            activeAuthSession = session
             session.presentationContextProvider = self
             session.prefersEphemeralWebBrowserSession = false
-            session.start()
+            guard session.start() else {
+                isAuthResumed = true
+                stopLocalLoopbackServer()
+                continuation.resume(throwing: authError("无法打开系统登录窗口"))
+                return
+            }
         }
     }
 
-    private func startLocalLoopbackServer(port: UInt16, onCodeCaptured: @escaping @Sendable (String) -> Void) {
-        stopLocalLoopbackServer()
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
-        guard let listener = try? NWListener(using: .tcp, on: nwPort) else { return }
-        self.localCallbackServer = listener
+    private func finishLogin(
+        callback: OAuthCallback,
+        expectedState: String,
+        pendingClientID: String,
+        verifier: String,
+        nonce: String
+    ) async throws -> UserAuthProfile {
+        guard callback.state == expectedState else { throw authError("登录状态校验失败，请重新发起授权") }
+        if let error = callback.error { throw authError("ChatGPT 未授权：\(error)") }
+        guard let code = callback.code, !code.isEmpty else { throw authError("登录回调缺少授权码") }
 
+        let issuedClientID: String
+        if pendingClientID == dynamicClientID {
+            guard let callbackClientID = callback.clientID, !callbackClientID.isEmpty else {
+                throw authError("ChatGPT 动态注册未返回 client_id")
+            }
+            issuedClientID = callbackClientID
+        } else {
+            if let callbackClientID = callback.clientID, callbackClientID != pendingClientID {
+                throw authError("登录回调的 client_id 与已保存账户不一致")
+            }
+            issuedClientID = pendingClientID
+        }
+
+        let token = try await exchangeCodeForToken(
+            code: code,
+            verifier: verifier,
+            clientID: issuedClientID,
+            nonce: nonce
+        )
+        guard token.scopes.contains("chatgpt.tokens.use.direct") else {
+            throw authError("已登录，但未授予“使用 ChatGPT 计划”权限")
+        }
+        let profile = UserAuthProfile(
+            provider: .chatgpt,
+            email: token.email,
+            accessToken: token.accessToken,
+            refreshToken: token.refreshToken,
+            quotaRemaining: "ChatGPT 计划使用权限已启用",
+            isLoggedIn: true,
+            clientID: issuedClientID,
+            idToken: token.idToken,
+            scopes: token.scopes,
+            expiresAt: token.expiresAt
+        )
+        saveProfile(profile)
+        return profile
+    }
+
+    private func startLocalLoopbackServer(port: UInt16, onCallback: @escaping @Sendable (OAuthCallback) -> Void) {
+        stopLocalLoopbackServer()
+        guard let nwPort = NWEndpoint.Port(rawValue: port),
+              let listener = try? NWListener(using: .tcp, on: nwPort) else { return }
+        localCallbackServer = listener
         listener.newConnectionHandler = { connection in
             connection.start(queue: .main)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                if let data = data, let req = String(data: data, encoding: .utf8) {
-                    // 解析 GET /auth/callback?code=xxx&state=yyy HTTP/1.1
-                    if let firstLine = req.components(separatedBy: "\r\n").first {
-                        let parts = firstLine.components(separatedBy: " ")
-                        if parts.count >= 2, let urlComps = URLComponents(string: "http://localhost:1455" + parts[1]) {
-                            if let code = urlComps.queryItems?.first(where: { $0.name == "code" })?.value {
-                                let html = "<html><head><meta charset='utf-8'><script>window.location.href='lovortplayer://auth/callback?code=\(code)';</script></head><body style='background:#0a0a0c;color:#00f2fe;font-family:sans-serif;text-align:center;padding-top:100px;'><h2>✅ ChatGPT 授权成功！</h2><p style='color:#fff;'>正在自动返回 Lovort 播放器...</p></body></html>"
-                                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
-                                connection.send(content: Data(resp.utf8), completion: .contentProcessed({ _ in
-                                    connection.cancel()
-                                    onCodeCaptured(code)
-                                }))
-                                return
-                            }
-                        }
-                    }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { data, _, _, _ in
+                guard let data,
+                      let request = String(data: data, encoding: .utf8),
+                      let requestTarget = request.components(separatedBy: "\r\n").first?.components(separatedBy: " ").dropFirst().first,
+                      let callbackURL = URL(string: "http://127.0.0.1:\(port)\(requestTarget)") else {
+                    connection.cancel()
+                    return
                 }
-                connection.cancel()
+                let callback = Self.parseCallback(url: callbackURL)
+                let successful = callback.code != nil && callback.error == nil
+                let title = successful ? "ChatGPT 授权完成" : "ChatGPT 授权未完成"
+                let body = "<html><head><meta charset='utf-8'></head><body style='font-family:-apple-system;text-align:center;padding-top:80px;background:#0a0a0c;color:white'><h2>\(title)</h2><p>现在可以返回 LovortPlayer。</p></body></html>"
+                let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+                    connection.cancel()
+                    onCallback(callback)
+                })
             }
         }
         listener.start(queue: .main)
+    }
+
+    private nonisolated static func parseCallback(url: URL) -> OAuthCallback {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? { items.first(where: { $0.name == name })?.value }
+        return OAuthCallback(code: value("code"), state: value("state"), clientID: value("client_id"), error: value("error"))
     }
 
     private func stopLocalLoopbackServer() {
@@ -213,111 +316,250 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
         localCallbackServer = nil
     }
 
-    private func exchangeCodeForToken(code: String, verifier: String) async -> (accessToken: String, refreshToken: String?, email: String) {
-        guard let url = URL(string: openAITokenURL) else {
-            return (code, nil, "ChatGPT 订阅账户 (OAuth 已认证)")
-        }
+    private func exchangeCodeForToken(
+        code: String,
+        verifier: String,
+        clientID: String,
+        nonce: String
+    ) async throws -> TokenResult {
+        guard let url = URL(string: tokenURL) else { throw authError("无效的令牌地址") }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        var formComponents = URLComponents()
-        formComponents.queryItems = [
+        var form = URLComponents()
+        form.queryItems = [
             URLQueryItem(name: "grant_type", value: "authorization_code"),
-            URLQueryItem(name: "client_id", value: codexClientID),
+            URLQueryItem(name: "client_id", value: clientID),
             URLQueryItem(name: "code", value: code),
-            URLQueryItem(name: "redirect_uri", value: codexRedirectURI),
-            URLQueryItem(name: "code_verifier", value: verifier)
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "code_verifier", value: verifier),
+            URLQueryItem(name: "resource", value: resource)
         ]
-        request.httpBody = formComponents.percentEncodedQuery?.data(using: .utf8)
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
 
-        let config = URLSessionConfiguration.default
-        let proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
-        let proxyPort = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
-        if !proxyHost.isEmpty && proxyPort > 0 {
-            config.connectionProxyDictionary = [
-                "HTTPEnable": 1,
-                "HTTPProxy": proxyHost,
-                "HTTPPort": proxyPort,
-                "HTTPSEnable": 1,
-                "HTTPSProxy": proxyHost,
-                "HTTPSPort": proxyPort
-            ]
+        let (data, response) = try await proxyAwareSession().data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["access_token"] as? String,
+              let idToken = json["id_token"] as? String else {
+            let message = String(decoding: data.prefix(800), as: UTF8.self)
+            throw authError("令牌交换失败：\(message)")
         }
-        let session = URLSession(configuration: config)
 
-        if let (data, _) = try? await session.data(for: request),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let accessToken = json["access_token"] as? String {
-            let refreshToken = json["refresh_token"] as? String
-            let email = extractEmailFromJWT(accessToken) ?? extractEmailFromJWT(json["id_token"] as? String ?? "") ?? "ChatGPT Plus/Pro 订阅账户"
-            return (accessToken, refreshToken, email)
-        }
-        return (code, nil, "ChatGPT 订阅账户 (OAuth 已认证)")
+        let claims = try await validateIDToken(idToken, clientID: clientID, nonce: nonce)
+        let scopeValue = (json["scope"] as? String) ?? (extractJWTClaims(accessToken)?["scope"] as? String) ?? ""
+        let scopes = scopeValue.split(separator: " ").map(String.init)
+        let expiresIn = (json["expires_in"] as? NSNumber)?.doubleValue ?? 3_600
+        let email = (claims["email"] as? String)
+            ?? ((claims["https://api.openai.com/profile"] as? [String: Any])?["email"] as? String)
+            ?? "ChatGPT 账户"
+        return TokenResult(
+            accessToken: accessToken,
+            refreshToken: json["refresh_token"] as? String,
+            idToken: idToken,
+            scopes: scopes,
+            expiresAt: Date().addingTimeInterval(expiresIn),
+            email: email
+        )
     }
 
-    private func extractEmailFromJWT(_ jwt: String) -> String? {
+    private func validateIDToken(_ token: String, clientID: String, nonce: String) async throws -> [String: Any] {
+        let segments = token.components(separatedBy: ".")
+        guard segments.count == 3,
+              let headerData = Data(base64URLEncoded: segments[0]),
+              let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any],
+              header["alg"] as? String == "RS256",
+              let keyID = header["kid"] as? String,
+              let signature = Data(base64URLEncoded: segments[2]) else {
+            throw authError("ID Token 头部或签名格式无效")
+        }
+        guard let jwksURL = URL(string: "https://auth.openai.com/.well-known/jwks.json") else {
+            throw authError("OpenAI JWKS 地址无效")
+        }
+        let (jwksData, response) = try await proxyAwareSession().data(from: jwksURL)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let jwks = try JSONSerialization.jsonObject(with: jwksData) as? [String: Any],
+              let keys = jwks["keys"] as? [[String: Any]],
+              let jwk = keys.first(where: { $0["kid"] as? String == keyID }),
+              jwk["kty"] as? String == "RSA",
+              let modulusValue = jwk["n"] as? String,
+              let exponentValue = jwk["e"] as? String,
+              let modulus = Data(base64URLEncoded: modulusValue),
+              let exponent = Data(base64URLEncoded: exponentValue),
+              let publicKey = rsaPublicKey(modulus: modulus, exponent: exponent) else {
+            throw authError("无法获取 OpenAI ID Token 公钥")
+        }
+        let signedData = Data("\(segments[0]).\(segments[1])".utf8)
+        var verificationError: Unmanaged<CFError>?
+        guard SecKeyVerifySignature(
+            publicKey,
+            .rsaSignatureMessagePKCS1v15SHA256,
+            signedData as CFData,
+            signature as CFData,
+            &verificationError
+        ) else {
+            throw authError("OpenAI ID Token 签名校验失败")
+        }
+
+        guard let claims = extractJWTClaims(token) else { throw authError("无法解析 OpenAI ID Token") }
+        guard claims["iss"] as? String == "https://auth.openai.com" else { throw authError("ID Token 签发方无效") }
+        let audienceMatches: Bool
+        if let audience = claims["aud"] as? String {
+            audienceMatches = audience == clientID
+        } else if let audiences = claims["aud"] as? [String] {
+            audienceMatches = audiences.contains(clientID)
+        } else {
+            audienceMatches = false
+        }
+        guard audienceMatches else { throw authError("ID Token 受众无效") }
+        guard claims["nonce"] as? String == nonce else { throw authError("ID Token nonce 校验失败") }
+        guard let expiry = (claims["exp"] as? NSNumber)?.doubleValue, expiry > Date().timeIntervalSince1970 else {
+            throw authError("ID Token 已过期")
+        }
+        return claims
+    }
+
+    private func rsaPublicKey(modulus: Data, exponent: Data) -> SecKey? {
+        let encodedKey = asn1Sequence(asn1Integer(modulus) + asn1Integer(exponent))
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits as String: modulus.count * 8
+        ]
+        return SecKeyCreateWithData(encodedKey as CFData, attributes as CFDictionary, nil)
+    }
+
+    private func asn1Integer(_ value: Data) -> Data {
+        var bytes = [UInt8](value)
+        while bytes.count > 1, bytes.first == 0, bytes[1] & 0x80 == 0 { bytes.removeFirst() }
+        if let first = bytes.first, first & 0x80 != 0 { bytes.insert(0, at: 0) }
+        return Data([0x02]) + asn1Length(bytes.count) + Data(bytes)
+    }
+
+    private func asn1Sequence(_ value: Data) -> Data {
+        Data([0x30]) + asn1Length(value.count) + value
+    }
+
+    private func asn1Length(_ length: Int) -> Data {
+        if length < 128 { return Data([UInt8(length)]) }
+        var value = length
+        var bytes: [UInt8] = []
+        while value > 0 {
+            bytes.insert(UInt8(value & 0xff), at: 0)
+            value >>= 8
+        }
+        return Data([0x80 | UInt8(bytes.count)]) + Data(bytes)
+    }
+
+    private func extractJWTClaims(_ jwt: String) -> [String: Any]? {
         let segments = jwt.components(separatedBy: ".")
-        guard segments.count > 1 else { return nil }
-        var base64 = segments[1]
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 {
-            base64.append("=")
+        guard segments.count == 3, let data = Data(base64URLEncoded: segments[1]) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    public func accessTokenForRequests() async throws -> String? {
+        guard var profile = currentProfile, profile.provider == .chatgpt, profile.isLoggedIn else { return nil }
+        guard profile.canUseChatGPTPlan else {
+            throw authError("当前登录记录没有 ChatGPT 计划使用权限，请退出后重新登录授权")
         }
-        guard let data = Data(base64Encoded: base64),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+        if let expiresAt = profile.expiresAt, expiresAt > Date().addingTimeInterval(90) {
+            return profile.accessToken
         }
-        if let email = json["email"] as? String, !email.isEmpty {
-            return email
+        guard let refreshToken = profile.refreshToken,
+              let clientID = profile.clientID,
+              let url = URL(string: tokenURL) else {
+            throw authError("ChatGPT 登录已过期，请重新登录")
         }
-        if let profile = json["https://api.openai.com/profile"] as? [String: Any],
-           let email = profile["email"] as? String, !email.isEmpty {
-            return email
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var form = URLComponents()
+        form.queryItems = [
+            URLQueryItem(name: "grant_type", value: "refresh_token"),
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "resource", value: resource)
+        ]
+        request.httpBody = form.percentEncodedQuery?.data(using: .utf8)
+        let (data, response) = try await proxyAwareSession().data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = json["access_token"] as? String else {
+            throw authError("ChatGPT 凭据刷新失败，请重新登录")
         }
-        return nil
+        let scopeValue = (json["scope"] as? String) ?? profile.scopes?.joined(separator: " ") ?? ""
+        let scopes = scopeValue.split(separator: " ").map(String.init)
+        guard scopes.contains("chatgpt.tokens.use.direct") else {
+            throw authError("刷新后的凭据不再包含 ChatGPT 计划使用权限")
+        }
+        profile.accessToken = accessToken
+        profile.refreshToken = (json["refresh_token"] as? String) ?? refreshToken
+        profile.idToken = (json["id_token"] as? String) ?? profile.idToken
+        profile.scopes = scopes
+        let expiresIn = (json["expires_in"] as? NSNumber)?.doubleValue ?? 3_600
+        profile.expiresAt = Date().addingTimeInterval(expiresIn)
+        saveProfile(profile)
+        return accessToken
+    }
+
+    private func proxyAwareSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        let host = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
+        let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
+        if !host.isEmpty, port > 0 {
+            configuration.connectionProxyDictionary = [
+                "HTTPEnable": 1, "HTTPProxy": host, "HTTPPort": port,
+                "HTTPSEnable": 1, "HTTPSProxy": host, "HTTPSPort": port
+            ]
+        }
+        return URLSession(configuration: configuration)
     }
 
     private func startAntigravityLogin() async throws -> UserAuthProfile {
-        guard let authURL = URL(string: "https://github.com/login") else {
-            throw NSError(domain: "AuthError", code: -1)
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "lovortplayer") { _, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                let profile = UserAuthProfile(
-                    provider: .antigravity,
-                    email: "Antigravity 开发者账户",
-                    accessToken: "agy_token",
-                    refreshToken: nil,
-                    quotaRemaining: "已授权",
-                    isLoggedIn: true
-                )
-                self.saveProfile(profile)
-                continuation.resume(returning: profile)
-            }
-            session.presentationContextProvider = self
-            session.start()
-        }
+        throw authError("Antigravity 登录尚未配置")
     }
 
     public func logout() {
+        if let accessToken = currentProfile?.accessToken {
+            clearLegacyOAuthToken(matching: accessToken)
+        }
         saveProfile(nil)
-        AISubtitleCoordinator.shared.saveOpenAIKey("")
     }
 
-    // MARK: - ASWebAuthenticationPresentationContextProviding
+    private func clearLegacyOAuthToken(matching accessToken: String) {
+        let key = "LovortOpenAIAPIKey"
+        if UserDefaults.standard.string(forKey: key) == accessToken {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private func authError(_ message: String) -> NSError {
+        NSError(domain: "AuthError", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         #if os(iOS)
-        let scenes = UIApplication.shared.connectedScenes
-        let windowScene = scenes.first as? UIWindowScene
-        return windowScene?.windows.first { $0.isKeyWindow } ?? ASPresentationAnchor()
+        let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        return scene?.windows.first(where: \.isKeyWindow) ?? ASPresentationAnchor()
         #else
         return ASPresentationAnchor()
         #endif
+    }
+}
+
+private extension Data {
+    init?<S: StringProtocol>(base64URLEncoded value: S) {
+        var base64 = String(value).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64.append("=") }
+        self.init(base64Encoded: base64)
+    }
+
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }

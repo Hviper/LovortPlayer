@@ -1,0 +1,23 @@
+{
+  "pins" : [
+    {
+      "identity" : "argmax-oss-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/argmaxinc/argmax-oss-swift.git",
+      "state" : {
+        "revision" : "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4",
+        "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "libdav1d-xcode",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SDWebImage/libdav1d-Xcode.git",
+      "state" : {
+        "revision" : "6a389f3cf98bb24d45255ed330f702309b312f8d",
+        "version" : "1.1.0"
+      }
+    }
+  ],
+  "version" : 2
+}

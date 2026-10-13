@@ -1,27 +1,343 @@
+import AVFoundation
 import Foundation
-import Speech
 
-public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked Sendable {
+public final class CloudAISubtitleService: @unchecked Sendable {
     private let apiKey: String
     private let baseURL: URL
+    private let maximumUploadBytes = 24 * 1_024 * 1_024
+    private let cloudSliceDuration: TimeInterval = 4 * 60
 
     public init(apiKey: String, baseURL: URL = URL(string: "https://api.openai.com/v1")!) {
-        self.apiKey = apiKey
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baseURL = baseURL
     }
 
-    /// 创建支持系统代理/Clash 代理与自定义 HTTP 代理的 URLSession
-    private func createProxyAwareSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 300
+    public func transcribe(
+        audioURL: URL,
+        sourceLanguage: SubtitleSourceLanguage,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> [SubtitleLine] {
+        guard apiKey.hasPrefix("sk-") else {
+            throw serviceError("云端语音转写需要 OpenAI Platform API Key；ChatGPT 订阅令牌不能调用音频接口")
+        }
 
-        // 检查用户是否自定义了本地代理（例如 127.0.0.1:7890）
+        let asset = AVURLAsset(url: audioURL)
+        let durationValue = try await asset.load(.duration)
+        let duration = CMTimeGetSeconds(durationValue)
+        guard duration.isFinite, duration > 0 else { throw serviceError("无法读取待转写音频的时长") }
+
+        let fileSize = (try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if fileSize > 0, fileSize <= maximumUploadBytes {
+            onProgress?("正在使用 OpenAI Whisper 转写音频...")
+            return try await requestWhisperTranscription(
+                audioURL: audioURL,
+                language: sourceLanguage.whisperCode
+            )
+        }
+
+        var allLines: [SubtitleLine] = []
+        let totalSlices = Int(ceil(duration / cloudSliceDuration))
+        for index in 0..<totalSlices {
+            try Task.checkCancellation()
+            let start = TimeInterval(index) * cloudSliceDuration
+            let sliceDuration = min(cloudSliceDuration, duration - start)
+            let sliceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("lovort-cloud-\(UUID().uuidString).m4a")
+            defer { try? FileManager.default.removeItem(at: sliceURL) }
+
+            onProgress?("正在处理云端转写分片 \(index + 1)/\(totalSlices)...")
+            try await exportAudioSlice(asset: asset, start: start, duration: sliceDuration, outputURL: sliceURL)
+            let sliceLines = try await requestWhisperTranscription(
+                audioURL: sliceURL,
+                language: sourceLanguage.whisperCode
+            )
+            allLines.append(contentsOf: sliceLines.map { line in
+                SubtitleLine(
+                    id: line.id,
+                    startTime: line.startTime + start,
+                    endTime: line.endTime + start,
+                    originalText: line.originalText,
+                    translatedText: line.translatedText
+                )
+            })
+        }
+        return allLines
+    }
+
+    public func translate(
+        lines: [SubtitleLine],
+        targetLanguage: String,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> [SubtitleLine] {
+        guard !lines.isEmpty else { return [] }
+        guard !apiKey.isEmpty else { return lines }
+
+        let batches = makeTranslationBatches(lines)
+        var translatedByID: [UUID: String] = [:]
+        for (batchIndex, batch) in batches.enumerated() {
+            try Task.checkCancellation()
+            onProgress?("正在翻译字幕 \(batchIndex + 1)/\(batches.count)...")
+            let values = try await requestTranslationBatch(lines: batch, targetLanguage: targetLanguage)
+            for (index, line) in batch.enumerated() where index < values.count {
+                let value = values[index].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { translatedByID[line.id] = value }
+            }
+        }
+
+        guard translatedByID.count == lines.count else {
+            throw serviceError("翻译结果数量不完整（收到 \(translatedByID.count)/\(lines.count) 句），已保留原文字幕")
+        }
+        return lines.map { line in
+            SubtitleLine(
+                id: line.id,
+                startTime: line.startTime,
+                endTime: line.endTime,
+                originalText: line.originalText,
+                translatedText: translatedByID[line.id]
+            )
+        }
+    }
+
+    private func makeTranslationBatches(_ lines: [SubtitleLine]) -> [[SubtitleLine]] {
+        var result: [[SubtitleLine]] = []
+        var current: [SubtitleLine] = []
+        var characterCount = 0
+        for line in lines {
+            let nextCount = characterCount + line.originalText.count
+            if !current.isEmpty, current.count >= 36 || nextCount > 7_000 {
+                result.append(current)
+                current = []
+                characterCount = 0
+            }
+            current.append(line)
+            characterCount += line.originalText.count
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
+
+    private func requestTranslationBatch(lines: [SubtitleLine], targetLanguage: String) async throws -> [String] {
+        let sourceObjects = lines.enumerated().map { index, line in
+            ["index": index, "text": line.originalText] as [String: Any]
+        }
+        let sourceData = try JSONSerialization.data(withJSONObject: sourceObjects)
+        let sourceJSON = String(decoding: sourceData, as: UTF8.self)
+        let prompt = """
+        将下面的影视台词翻译为“\(targetLanguage)”。结合整批上下文处理人名、称谓、俚语和语气，适合日漫或美剧字幕；不得增删、合并或拆分条目。
+        只返回严格 JSON 数组，不要 Markdown。每项格式为 {"index": 原索引, "translation": "译文"}，必须覆盖 0 到 \(lines.count - 1)。
+        输入：\(sourceJSON)
+        """
+
+        let activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
+        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-4o-mini"])
+        var lastError: Error?
+        for model in candidateModels {
+            do {
+                let content = try await requestTranslationText(prompt: prompt, model: model)
+                return try Self.decodeTranslations(from: content, expectedCount: lines.count)
+            } catch {
+                lastError = error
+                let status = (error as NSError).code
+                if status == 401 || status == 403 || status == 429 || status >= 500 { break }
+            }
+        }
+        throw lastError ?? serviceError("字幕翻译请求失败")
+    }
+
+    static func decodeTranslations(from content: String, expectedCount: Int) throws -> [String] {
+        guard let start = content.firstIndex(of: "["),
+              let end = content.lastIndex(of: "]"),
+              start <= end else {
+            throw NSError(domain: "SubtitleTranslationError", code: -20, userInfo: [NSLocalizedDescriptionKey: "大模型未返回 JSON 数组"])
+        }
+        let data = Data(content[start...end].utf8)
+        guard let objects = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw NSError(domain: "SubtitleTranslationError", code: -21, userInfo: [NSLocalizedDescriptionKey: "无法解析大模型翻译结果"])
+        }
+        var indexed: [Int: String] = [:]
+        for object in objects {
+            let index: Int?
+            if let intValue = object["index"] as? Int {
+                index = intValue
+            } else if let numberValue = object["index"] as? NSNumber {
+                index = numberValue.intValue
+            } else if let stringValue = object["index"] as? String {
+                index = Int(stringValue)
+            } else {
+                index = nil
+            }
+            if let index, let translation = object["translation"] as? String { indexed[index] = translation }
+        }
+        guard indexed.count == expectedCount else {
+            throw NSError(domain: "SubtitleTranslationError", code: -22, userInfo: [NSLocalizedDescriptionKey: "大模型返回的字幕条目数不匹配"])
+        }
+        return try (0..<expectedCount).map { index in
+            guard let value = indexed[index] else {
+                throw NSError(domain: "SubtitleTranslationError", code: -23, userInfo: [NSLocalizedDescriptionKey: "翻译结果缺少第 \(index) 条字幕"])
+            }
+            return value
+        }
+    }
+
+    private func requestTranslationText(prompt: String, model: String) async throws -> String {
+        if apiKey.hasPrefix("sk-") {
+            return try await requestPlatformResponse(prompt: prompt, model: model)
+        }
+        return try await requestSubscriptionResponse(prompt: prompt, model: model)
+    }
+
+    private func requestPlatformResponse(prompt: String, model: String) async throws -> String {
+        var request = URLRequest(url: baseURL.appendingPathComponent("responses"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "instructions": "You are a professional audiovisual subtitle translator. Return only the requested JSON.",
+            "input": prompt,
+            "store": false
+        ])
+        let (data, response) = try await createProxyAwareSession().data(for: request)
+        try validate(response: response, data: data)
+        return try extractResponseText(from: data)
+    }
+
+    private func requestSubscriptionResponse(prompt: String, model: String) async throws -> String {
+        guard let endpoint = URL(string: "https://api.openai.com/v1/responses") else {
+            throw serviceError("ChatGPT 翻译地址无效")
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "instructions": "You are a professional audiovisual subtitle translator. Return only the requested JSON.",
+            "input": [["role": "user", "content": prompt]],
+            "store": false,
+            "stream": true
+        ])
+        let (data, response) = try await createProxyAwareSession().data(for: request)
+        try validate(response: response, data: data)
+        return try Self.extractStreamingResponseText(from: data)
+    }
+
+    static func extractStreamingResponseText(from data: Data) throws -> String {
+        let payload = String(decoding: data, as: UTF8.self)
+        var output = ""
+        var completed = false
+        var failureMessage: String?
+        for line in payload.components(separatedBy: .newlines) where line.hasPrefix("data:") {
+            let value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard value != "[DONE]", let eventData = value.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
+                  let type = event["type"] as? String else { continue }
+            switch type {
+            case "response.output_text.delta":
+                output += event["delta"] as? String ?? ""
+            case "response.completed":
+                completed = true
+                if output.isEmpty,
+                   let response = event["response"] as? [String: Any],
+                   let responseData = try? JSONSerialization.data(withJSONObject: response),
+                   let text = try? extractResponseTextFromJSON(data: responseData) {
+                    output = text
+                }
+            case "response.failed", "response.incomplete":
+                if let response = event["response"] as? [String: Any],
+                   let error = response["error"] as? [String: Any] {
+                    failureMessage = error["message"] as? String ?? error["code"] as? String
+                }
+            default:
+                continue
+            }
+        }
+        guard completed else {
+            throw NSError(
+                domain: "OpenAIStreamingError",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: failureMessage ?? "ChatGPT 流式响应未正常完成"]
+            )
+        }
+        guard !output.isEmpty else {
+            throw NSError(
+                domain: "OpenAIStreamingError",
+                code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "ChatGPT 完成响应但没有返回译文"]
+            )
+        }
+        return output
+    }
+
+    private static func extractResponseTextFromJSON(data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let output = json["output"] as? [[String: Any]] else {
+            throw NSError(domain: "OpenAIStreamingError", code: -32)
+        }
+        for item in output {
+            guard let content = item["content"] as? [[String: Any]] else { continue }
+            for part in content {
+                if let text = part["text"] as? String, !text.isEmpty { return text }
+            }
+        }
+        throw NSError(domain: "OpenAIStreamingError", code: -33)
+    }
+
+    private func requestWhisperTranscription(audioURL: URL, language: String?) async throws -> [SubtitleLine] {
+        let audioData = try Data(contentsOf: audioURL)
+        guard audioData.count <= maximumUploadBytes else {
+            throw serviceError("音频分片仍超过 OpenAI 25 MB 限制，请改用离线 WhisperKit")
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var body = Data()
+        body.appendFormField(name: "model", value: "whisper-1", boundary: boundary)
+        body.appendFormField(name: "response_format", value: "srt", boundary: boundary)
+        if let language { body.appendFormField(name: "language", value: language, boundary: boundary) }
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.m4a\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
+        body.append(audioData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("audio/transcriptions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+
+        let (data, response) = try await createProxyAwareSession().data(for: request)
+        try validate(response: response, data: data)
+        let lines = SRTParser.parse(srtString: String(decoding: data, as: UTF8.self))
+        guard !lines.isEmpty else { throw serviceError("OpenAI 未返回可用的带时间戳字幕") }
+        return lines
+    }
+
+    private func exportAudioSlice(asset: AVAsset, start: TimeInterval, duration: TimeInterval, outputURL: URL) async throws {
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw serviceError("无法创建云端音频分片")
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(
+            start: CMTime(seconds: start, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
+        try? FileManager.default.removeItem(at: outputURL)
+        await exportSession.export()
+        guard exportSession.status == .completed else {
+            throw exportSession.error ?? serviceError("云端音频分片导出失败")
+        }
+    }
+
+    private func createProxyAwareSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 90
+        configuration.timeoutIntervalForResource = 600
         let proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
         let proxyPort = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
-
-        if !proxyHost.isEmpty && proxyPort > 0 {
-            config.connectionProxyDictionary = [
+        if !proxyHost.isEmpty, proxyPort > 0 {
+            configuration.connectionProxyDictionary = [
                 "HTTPEnable": 1,
                 "HTTPProxy": proxyHost,
                 "HTTPPort": proxyPort,
@@ -30,432 +346,54 @@ public final class CloudAISubtitleService: AISubtitleServiceProtocol, @unchecked
                 "HTTPSPort": proxyPort
             ]
         }
-        return URLSession(configuration: config)
+        return URLSession(configuration: configuration)
     }
 
-    public func transcribeAndTranslate(audioURL: URL, targetLanguage: String) async throws -> [SubtitleLine] {
-        try await transcribeAndTranslate(audioURL: audioURL, targetLanguage: targetLanguage, sourceLanguage: "自动检测", onProgress: nil)
-    }
-
-    public func transcribeAndTranslate(
-        audioURL: URL,
-        targetLanguage: String = "zh",
-        sourceLanguage: String = "自动检测",
-        onProgress: (@Sendable (String) -> Void)? = nil
-    ) async throws -> [SubtitleLine] {
-        var parsedLines: [SubtitleLine] = []
-
-        // 1. 如果是 sk- 开头的 OpenAI Platform Key，优先尝试 Whisper API
-        if apiKey.hasPrefix("sk-") {
-            onProgress?("正在调用 Whisper API 进行语音转录...")
-            if let srtText = try? await requestWhisperTranscription(audioURL: audioURL) {
-                parsedLines = SRTParser.parse(srtString: srtText)
-            }
-        }
-
-        // 2. 若未走 Whisper 或 Whisper 失败，使用高精度分片语音识别（突破 1 分钟限制，支持任意长视频）
-        if parsedLines.isEmpty {
-            onProgress?("正在使用原生语音引擎分片识别长音轨...")
-            parsedLines = await transcribeWithAppleSpeechChunked(audioURL: audioURL, sourceLanguage: sourceLanguage, onProgress: onProgress)
-        }
-
-        guard !parsedLines.isEmpty else {
-            throw NSError(domain: "AISubtitleError", code: -10, userInfo: [NSLocalizedDescriptionKey: "未能从音轨中检测到清晰语音台词，请确认视频包含人声"])
-        }
-
-        // 3. 将转录文字传给 GPT (支持 ChatGPT Plus/Pro OAuth 订阅通道与 API Key 通道) 做上下文双语翻译润色
-        onProgress?("正在调用 GPT 订阅大模型进行双语润色与对齐 (共 \(parsedLines.count) 句)...")
-        let translatedLines = try await requestTranslation(lines: parsedLines, targetLanguage: targetLanguage)
-        return translatedLines
-    }
-
-    /// 长音频分片转录（按 35 秒为一段依次切割音频，绕过 iOS 系统的 1 分钟限制，支持几小时长视频）
-    private func transcribeWithAppleSpeechChunked(
-        audioURL: URL,
-        sourceLanguage: String,
-        onProgress: (@Sendable (String) -> Void)?
-    ) async -> [SubtitleLine] {
-        let authorized = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status == .authorized)
-            }
-        }
-        guard authorized else { return [] }
-
-        let asset = AVURLAsset(url: audioURL)
-        var totalDuration: TimeInterval = 0
-        if let dur = try? await asset.load(.duration) {
-            let sec = CMTimeGetSeconds(dur)
-            if sec.isFinite && sec > 0 {
-                totalDuration = sec
-            }
-        }
-
-        guard totalDuration > 0 else { return [] }
-
-        // 选择最佳语言 Locale (优先支持动漫日语、欧美影视英语、华语与韩语)
-        var locale = Locale(identifier: "ja-JP") // 动漫影视优先默认日语
-        let lowerLang = sourceLanguage.lowercased()
-        if lowerLang.contains("日") || lowerLang.contains("ja") || lowerLang.contains("jp") || lowerLang.contains("动漫") || lowerLang.contains("anime") {
-            locale = Locale(identifier: "ja-JP")
-        } else if lowerLang.contains("英") || lowerLang.contains("en") {
-            locale = Locale(identifier: "en-US")
-        } else if lowerLang.contains("中") || lowerLang.contains("zh") || lowerLang.contains("国语") || lowerLang.contains("普通话") {
-            locale = Locale(identifier: "zh-CN")
-        } else if lowerLang.contains("韩") || lowerLang.contains("ko") {
-            locale = Locale(identifier: "ko-KR")
-        } else {
-            // "自动检测"：检查文件名或当前环境
-            let filename = audioURL.lastPathComponent.lowercased()
-            if filename.contains("anime") || filename.contains("raw") || filename.contains("ep") || filename.contains("sub") || filename.contains("ova") || filename.contains("movie") || filename.contains("bebop") || filename.contains("jin") {
-                locale = Locale(identifier: "ja-JP")
-            } else if let sysLocale = SFSpeechRecognizer.supportedLocales().first(where: { $0.identifier == Locale.current.identifier }) {
-                locale = sysLocale
-            } else {
-                locale = Locale(identifier: "ja-JP")
-            }
-        }
-
-        let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(locale: Locale(identifier: "ja-JP")) ?? SFSpeechRecognizer()
-        guard let recognizer = recognizer, recognizer.isAvailable else { return [] }
-
-        // 如果时长小于 45 秒，直接单次识别
-        if totalDuration <= 45.0 {
-            return await recognizeSingleAudioClip(audioURL: audioURL, recognizer: recognizer, locale: locale, timeOffset: 0)
-        }
-
-        // 长音频采用 32 秒切片，步长 28 秒（4秒滑动交叠，防止任何台词被截断在切片边界）
-        let sliceDuration: TimeInterval = 32.0
-        let stepDuration: TimeInterval = 28.0
-        var currentStart: TimeInterval = 0
-        var allLines: [SubtitleLine] = []
-        let totalSlices = Int(ceil(totalDuration / stepDuration))
-        var sliceIndex = 1
-
-        while currentStart < totalDuration {
-            let thisDuration = min(sliceDuration, totalDuration - currentStart)
-            onProgress?("正在语音识别分片 (\(sliceIndex)/\(totalSlices))...")
-
-            let sliceURL = FileManager.default.temporaryDirectory.appendingPathComponent("slice_\(UUID().uuidString).m4a")
-            let exportSuccess = await exportAudioSlice(
-                asset: asset,
-                from: currentStart,
-                duration: thisDuration,
-                outputURL: sliceURL
-            )
-
-            if exportSuccess {
-                let sliceLines = await recognizeSingleAudioClip(
-                    audioURL: sliceURL,
-                    recognizer: recognizer,
-                    locale: locale,
-                    timeOffset: currentStart
-                )
-                // 智能合并交叠段，去重相邻时间戳相同的台词
-                allLines = mergeSubtitleLines(existing: allLines, incoming: sliceLines)
-                try? FileManager.default.removeItem(at: sliceURL)
-            }
-
-            currentStart += stepDuration
-            sliceIndex += 1
-        }
-
-        return allLines
-    }
-
-    /// 智能合并重叠分片的台词，避免重复
-    private func mergeSubtitleLines(existing: [SubtitleLine], incoming: [SubtitleLine]) -> [SubtitleLine] {
-        var merged = existing
-        for line in incoming {
-            if let last = merged.last {
-                // 如果与上一句时间差小于 2 秒，且文本高度重叠或完全一致，去重
-                if abs(last.startTime - line.startTime) < 2.0 {
-                    if last.originalText == line.originalText || last.originalText.contains(line.originalText) {
-                        continue
-                    }
-                    if line.originalText.contains(last.originalText) {
-                        merged.removeLast()
-                        merged.append(line)
-                        continue
-                    }
-                }
-            }
-            merged.append(line)
-        }
-        return merged
-    }
-
-    /// 截取音频的一个短分片
-    private func exportAudioSlice(asset: AVURLAsset, from startSec: TimeInterval, duration durSec: TimeInterval, outputURL: URL) async -> Bool {
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
-            return false
-        }
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = .m4a
-        exportSession.timeRange = CMTimeRange(
-            start: CMTime(seconds: startSec, preferredTimescale: 600),
-            duration: CMTime(seconds: durSec, preferredTimescale: 600)
-        )
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-        await exportSession.export()
-        return exportSession.status == .completed
-    }
-
-    /// 识别单个短音频片段并映射全局时间戳（持续保存 latestTranscription，EOF 不丢弃非 final 结果）
-    private func recognizeSingleAudioClip(
-        audioURL: URL,
-        recognizer: SFSpeechRecognizer,
-        locale: Locale,
-        timeOffset: TimeInterval
-    ) async -> [SubtitleLine] {
-        let request = SFSpeechURLRecognitionRequest(url: audioURL)
-        request.shouldReportPartialResults = false
-
-        final class RecognitionHolder: @unchecked Sendable {
-            var hasResumed = false
-            var bestTranscription: SFTranscription?
-        }
-        let holder = RecognitionHolder()
-
-        return await withCheckedContinuation { continuation in
-            recognizer.recognitionTask(with: request) { result, error in
-                guard !holder.hasResumed else { return }
-                if let r = result {
-                    holder.bestTranscription = r.bestTranscription
-                }
-
-                if result?.isFinal == true || error != nil {
-                    holder.hasResumed = true
-                    guard let transcription = holder.bestTranscription else {
-                        continuation.resume(returning: [])
-                        return
-                    }
-
-                    var lines: [SubtitleLine] = []
-                    var currentText = ""
-                    var chunkStart: TimeInterval = 0
-                    var lastEnd: TimeInterval = 0
-
-                    let isCJK = locale.identifier.hasPrefix("ja") || locale.identifier.hasPrefix("zh")
-
-                    for segment in transcription.segments {
-                        if currentText.isEmpty {
-                            chunkStart = timeOffset + segment.timestamp
-                        }
-                        let separator = (currentText.isEmpty || isCJK) ? "" : " "
-                        currentText += separator + segment.substring
-                        lastEnd = timeOffset + segment.timestamp + segment.duration
-
-                        let sub = segment.substring
-                        let isPunctuationEnd = sub.hasSuffix(".") || sub.hasSuffix("?") || sub.hasSuffix("!") || sub.hasSuffix("。") || sub.hasSuffix("？") || sub.hasSuffix("！") || sub.hasSuffix("…") || sub.hasSuffix("、")
-
-                        if currentText.count >= (isCJK ? 24 : 36) || isPunctuationEnd || (lastEnd - chunkStart) >= 4.5 {
-                            lines.append(
-                                SubtitleLine(
-                                    startTime: chunkStart,
-                                    endTime: max(chunkStart + 1.2, lastEnd),
-                                    originalText: currentText.trimmingCharacters(in: .whitespacesAndNewlines),
-                                    translatedText: ""
-                                )
-                            )
-                            currentText = ""
-                        }
-                    }
-                    if !currentText.isEmpty {
-                        lines.append(
-                            SubtitleLine(
-                                startTime: chunkStart,
-                                endTime: max(chunkStart + 1.2, lastEnd),
-                                originalText: currentText.trimmingCharacters(in: .whitespacesAndNewlines),
-                                translatedText: ""
-                            )
-                        )
-                    }
-                    continuation.resume(returning: lines)
-                }
-            }
-        }
-    }
-
-    private func requestWhisperTranscription(audioURL: URL) async throws -> String {
-        let endpoint = baseURL.appendingPathComponent("audio/transcriptions")
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        let audioData = try Data(contentsOf: audioURL)
-        var body = Data()
-
-        // 添加 model 参数
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
-        body.append("whisper-1\r\n".data(using: .utf8)!)
-
-        // 添加 response_format = srt
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".data(using: .utf8)!)
-        body.append("srt\r\n".data(using: .utf8)!)
-
-        // 添加 file 参数
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.m4a\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
-        body.append(audioData)
-        body.append("\r\n".data(using: .utf8)!)
-
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-        request.httpBody = body
-
-        let session = createProxyAwareSession()
-        let (data, response) = try await session.data(for: request)
+    private func validate(response: URLResponse, data: Data) throws {
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "HTTP 响应错误"
-            throw NSError(domain: "WhisperAPIError", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
+            let message = Self.apiErrorMessage(from: data)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "OpenAIServiceError", code: status, userInfo: [NSLocalizedDescriptionKey: "OpenAI 请求失败（HTTP \(status)）：\(message)"])
         }
-
-        return String(data: data, encoding: .utf8) ?? ""
     }
 
-    private func extractChatGPTAccountID(from jwt: String) -> String? {
-        let segments = jwt.components(separatedBy: ".")
-        guard segments.count > 1 else { return nil }
-        var base64 = segments[1]
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 {
-            base64.append("=")
+    private func extractResponseText(from data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw serviceError("无法解析大模型响应")
         }
-        guard let data = Data(base64Encoded: base64),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let authClaim = json["https://api.openai.com/auth"] as? [String: Any],
-              let accountID = authClaim["chatgpt_account_id"] as? String else {
-            return nil
-        }
-        return accountID
-    }
-
-    private func requestTranslation(lines: [SubtitleLine], targetLanguage: String) async throws -> [SubtitleLine] {
-        let textsToTranslate = lines.map { $0.originalText }.joined(separator: "\n---\n")
-        let prompt = """
-        你是一位顶级专业动漫字幕组与影视本地化翻译专家。
-        请将以下原始台词逐句翻译为\(targetLanguage)，保持原汁原味的语境、角色性格与文化内涵（保留合适的动漫称呼与语气习惯，避免机械直译）。
-        严格保持相同的行数与 '---' 分隔符，只输出对应翻译文本：
-        \(textsToTranslate)
-        """
-
-        var translatedContent: String?
-
-        let activeModel = await MainActor.run {
-            AIModelManager.shared.selectedModelID
-        }
-
-        let fallbackCandidateModels = [activeModel, "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-4o-mini"]
-
-        // 1. 如果是 ChatGPT OAuth 订阅 Token (调用 chatgpt.com/backend-api/codex/responses)
-        if !apiKey.hasPrefix("sk-"), let codexURL = URL(string: "https://chatgpt.com/backend-api/codex/responses") {
-            let session = createProxyAwareSession()
-            let accountID = extractChatGPTAccountID(from: apiKey)
-
-            for tryModel in fallbackCandidateModels {
-                var codexReq = URLRequest(url: codexURL)
-                codexReq.httpMethod = "POST"
-                codexReq.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                codexReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                codexReq.setValue("responses=experimental", forHTTPHeaderField: "OpenAI-Beta")
-                if let accountID = accountID {
-                    codexReq.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
-                }
-
-                let codexPayload: [String: Any] = [
-                    "model": tryModel,
-                    "instructions": "You are a professional anime and movie fansub translator. Translate dialogue into authentic natural subtitles.",
-                    "input": [
-                        [
-                            "role": "user",
-                            "content": [
-                                ["type": "input_text", "text": prompt]
-                            ]
-                        ]
-                    ],
-                    "store": false
-                ]
-                codexReq.httpBody = try? JSONSerialization.data(withJSONObject: codexPayload)
-
-                if let (data, response) = try? await session.data(for: codexReq),
-                   let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let output = json["output"] as? [[String: Any]] {
-                    for item in output {
-                        if let contentArr = item["content"] as? [[String: Any]] {
-                            for c in contentArr {
-                                if let text = c["text"] as? String, !text.isEmpty {
-                                    translatedContent = text
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    if translatedContent != nil {
-                        break
-                    }
+        if let outputText = json["output_text"] as? String, !outputText.isEmpty { return outputText }
+        if let output = json["output"] as? [[String: Any]] {
+            for item in output {
+                guard let content = item["content"] as? [[String: Any]] else { continue }
+                for part in content {
+                    if let text = part["text"] as? String, !text.isEmpty { return text }
                 }
             }
         }
+        throw serviceError("大模型响应中没有文本内容")
+    }
 
-        // 2. 如果未通过 Codex OAuth 拿到翻译，走标准 OpenAI chat/completions
-        if translatedContent == nil {
-            let endpoint = baseURL.appendingPathComponent("chat/completions")
-            var request = URLRequest(url: endpoint)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    private static func apiErrorMessage(from data: Data) -> String {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = json["error"] as? [String: Any],
+           let message = error["message"] as? String { return message }
+        return String(decoding: data.prefix(600), as: UTF8.self)
+    }
 
-            let payload: [String: Any] = [
-                "model": activeModel,
-                "messages": [
-                    ["role": "system", "content": "You are a professional movie subtitle translator."],
-                    ["role": "user", "content": prompt]
-                ],
-                "temperature": 0.3
-            ]
+    private func uniqueModels(_ models: [String]) -> [String] {
+        var seen = Set<String>()
+        return models.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 
-            request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+    private func serviceError(_ message: String) -> NSError {
+        NSError(domain: "AISubtitleServiceError", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
 
-            let session = createProxyAwareSession()
-            if let (data, response) = try? await session.data(for: request),
-               let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let choices = json["choices"] as? [[String: Any]],
-               let firstChoice = choices.first,
-               let message = firstChoice["message"] as? [String: Any],
-               let content = message["content"] as? String {
-                translatedContent = content
-            }
-        }
-
-        guard let content = translatedContent else {
-            return lines
-        }
-
-        let translatedParts = content.components(separatedBy: "---").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        var result: [SubtitleLine] = []
-        for (i, line) in lines.enumerated() {
-            let trans = i < translatedParts.count ? translatedParts[i] : line.originalText
-            result.append(
-                SubtitleLine(
-                    id: line.id,
-                    startTime: line.startTime,
-                    endTime: line.endTime,
-                    originalText: line.originalText,
-                    translatedText: trans
-                )
-            )
-        }
-        return result
+private extension Data {
+    mutating func appendFormField(name: String, value: String, boundary: String) {
+        append("--\(boundary)\r\n".data(using: .utf8)!)
+        append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+        append("\(value)\r\n".data(using: .utf8)!)
     }
 }
