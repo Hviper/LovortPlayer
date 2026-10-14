@@ -19,6 +19,7 @@ struct LovortPlayerApp: App {
         WindowGroup {
             MediaLibraryHomeView()
                 .preferredColorScheme(.dark)
+                .task { SubtitleVideoExporter.shared.cleanupExpired() }
         }
     }
 }

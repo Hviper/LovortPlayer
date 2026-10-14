@@ -23,6 +23,8 @@ public struct FullscreenVideoPlayerView: View {
     @State private var hideHUDTask: Task<Void, Never>? = nil
     @State private var initialVolume: Float = 0.5
     @State private var showSubtitleTimeline = false
+    @State private var showSubtitleExport = false
+    @State private var bottomControlsHeight: CGFloat = 0
 
     public init(videoURL: URL, videoTitle: String, isPrivate: Bool = false, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
@@ -95,7 +97,8 @@ public struct FullscreenVideoPlayerView: View {
             #endif
 
             // AI 实时双语字幕图层 (确保置于控制层下方，不受控制栏显隐影响)
-            AISubtitleOverlayView(subtitle: viewModel.currentSubtitle)
+            AISubtitleOverlayView(subtitle: viewModel.currentSubtitle, videoSize: subtitleVideoSize,
+                                  controlsHeight: viewModel.showControls ? (bottomControlsHeight > 0 ? bottomControlsHeight : (viewModel.isClipMode ? 180 : 128)) : 0)
 
             if viewModel.isGeneratingSubtitles {
                 VStack {
@@ -161,15 +164,22 @@ public struct FullscreenVideoPlayerView: View {
                             viewModel.exportClip()
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: SubtitleControlsHeightKey.self, value: geometry.size.height)
+                        })
                     } else {
                         bottomControlsBar
                             .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: SubtitleControlsHeightKey.self, value: geometry.size.height)
+                        })
                     }
                 }
                 .animation(.easeInOut(duration: 0.25), value: viewModel.showControls)
                 .animation(.easeInOut(duration: 0.25), value: viewModel.isClipMode)
             }
         }
+        .onPreferenceChange(SubtitleControlsHeightKey.self) { bottomControlsHeight = $0 }
         .translationTask(appleTranslation.configuration) { session in
             await appleTranslation.perform(using: session)
         }
@@ -203,9 +213,22 @@ public struct FullscreenVideoPlayerView: View {
             AISubtitleSettingsSheet(viewModel: viewModel)
             #endif
         }
+        .sheet(isPresented: $showSubtitleExport) {
+            SubtitleVideoExportSheet(videoURL: videoURL, videoTitle: videoTitle)
+        }
         .sheet(isPresented: $showSubtitleTimeline) {
             SubtitleTimelineSheet(viewModel: viewModel)
         }
+    }
+
+    private var subtitleVideoSize: CGSize {
+        if viewModel.isAV1SoftwareMode, let frame = viewModel.currentSoftwareFrame {
+            return CGSize(width: frame.width, height: frame.height)
+        }
+        if viewModel.isCompatibilityMode {
+            return viewModel.compatibilityCoordinator?.playerLayer?.player.naturalSize ?? .zero
+        }
+        return viewModel.player?.currentItem?.presentationSize ?? .zero
     }
 
     // MARK: - 顶部导航条
@@ -291,8 +314,12 @@ public struct FullscreenVideoPlayerView: View {
                 .background(Capsule().fill(Color.white.opacity(0.15)))
             }
 
-            // 分享与导出菜单 (系统分享/保存相册/存储文件)
+            // 分享与导出菜单
             Menu {
+                Button { showSubtitleExport = true } label: {
+                    Label("导出带字幕视频", systemImage: "captions.bubble")
+                }
+                Divider()
                 Button {
                     VideoExportManager.shared.shareVideo(url: videoURL)
                 } label: {
@@ -544,4 +571,9 @@ public struct FullscreenVideoPlayerView: View {
         let secs = Int(seconds) % 60
         return String(format: "%02d:%02d", mins, secs)
     }
+}
+
+private struct SubtitleControlsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }

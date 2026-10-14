@@ -69,9 +69,9 @@ public final class VideoExportManager: NSObject {
     }
 
     // MARK: - 2. 系统分享 (Share Sheet: AirDrop / 微信 / 信息 / 更多)
-    public func shareVideo(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil) {
+    public func shareVideo(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
         #if os(iOS)
-        guard let topVC = UIApplication.topViewController else { return }
+        guard let topVC = UIApplication.topViewController else { completion?(); return }
 
         let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
 
@@ -88,6 +88,9 @@ public final class VideoExportManager: NSObject {
             }
         }
 
+        activityVC.completionWithItemsHandler = { _, _, _, _ in
+            Task { @MainActor in completion?() }
+        }
         topVC.present(activityVC, animated: true)
         #elseif os(macOS)
         if let view = NSApplication.shared.keyWindow?.contentView {
@@ -98,9 +101,9 @@ public final class VideoExportManager: NSObject {
     }
 
     // MARK: - 3. 存储到“文件” (Save to Files: iCloud Drive / 本地文件)
-    public func saveToFiles(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil) {
+    public func saveToFiles(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
         #if os(iOS)
-        guard let topVC = UIApplication.topViewController else { return }
+        guard let topVC = UIApplication.topViewController else { completion?(); return }
 
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
         let delegate = DocumentExportDelegate { [weak self] savedURL in
@@ -108,6 +111,7 @@ public final class VideoExportManager: NSObject {
                 MediaLibraryManager.shared.showNotification(message: "已成功存储到“文件”")
             }
             self?.activePickerDelegate = nil
+            completion?()
         }
         self.activePickerDelegate = delegate
         picker.delegate = delegate
@@ -123,6 +127,7 @@ public final class VideoExportManager: NSObject {
                 try? FileManager.default.copyItem(at: url, to: dest)
                 MediaLibraryManager.shared.showNotification(message: "已成功存储到：\(dest.lastPathComponent)")
             }
+            completion?()
         }
         #endif
     }

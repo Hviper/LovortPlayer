@@ -8,6 +8,7 @@ public struct VideoCardView: View {
     public var onDelete: (() -> Void)? = nil
 
     @State private var thumbnail: Image? = nil
+    @State private var showSubtitleExport = false
     @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
 
     private var subtitleTask: SubtitleTaskItem? {
@@ -137,6 +138,9 @@ public struct VideoCardView: View {
                     // 快捷操作菜单 ("...")
                     Menu {
                         subtitleMenu
+                        Button { showSubtitleExport = true } label: {
+                            Label("导出带字幕视频", systemImage: "captions.bubble")
+                        }
 
                         Divider()
 
@@ -193,6 +197,9 @@ public struct VideoCardView: View {
         .buttonStyle(.plain)
         .contextMenu {
             subtitleMenu
+            Button { showSubtitleExport = true } label: {
+                Label("导出带字幕视频", systemImage: "captions.bubble")
+            }
 
             Divider()
 
@@ -226,6 +233,9 @@ public struct VideoCardView: View {
                     Label("删除视频", systemImage: "trash")
                 }
             }
+        }
+        .sheet(isPresented: $showSubtitleExport) {
+            SubtitleVideoExportSheet(videoURL: video.fileURL, videoTitle: video.title)
         }
         .task {
             await generateThumbnail()
