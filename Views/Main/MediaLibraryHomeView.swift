@@ -260,7 +260,7 @@ public struct MediaLibraryHomeView: View {
                 Text("输入安全密码以解锁保密视频")
             }
         }
-        .translationTask(appleTranslation.configuration) { session in
+        .translationTask(selectedVideo == nil ? appleTranslation.configuration : nil) { session in
             await appleTranslation.perform(using: session)
         }
     }

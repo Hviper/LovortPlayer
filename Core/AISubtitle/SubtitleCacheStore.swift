@@ -6,6 +6,7 @@ public struct SubtitleDocument: Codable, Sendable {
     public let targetLanguage: String
     public let engine: AISubtitleEngineType
     public let model: String?
+    public let translationConfiguration: String?
     public let translationProvider: SubtitleTranslationProviderType?
     public let isComplete: Bool?
     public let translationComplete: Bool?
@@ -23,6 +24,7 @@ public struct SubtitleDocument: Codable, Sendable {
         engine: AISubtitleEngineType,
         model: String?,
         translationProvider: SubtitleTranslationProviderType? = nil,
+        translationConfiguration: String? = nil,
         isComplete: Bool = true,
         translationComplete: Bool? = nil,
         gptEnhanced: Bool? = nil,
@@ -36,6 +38,7 @@ public struct SubtitleDocument: Codable, Sendable {
         self.targetLanguage = targetLanguage
         self.engine = engine
         self.model = model
+        self.translationConfiguration = translationConfiguration
         self.translationProvider = translationProvider
         self.isComplete = isComplete
         self.translationComplete = translationComplete

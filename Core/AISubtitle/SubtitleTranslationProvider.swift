@@ -7,6 +7,9 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
     case deepL
     case google
     case azure
+    case zhipu
+    case volcengine
+    case customChat
 
     public var id: String { rawValue }
 
@@ -17,6 +20,9 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
         case .deepL: return "DeepL API"
         case .google: return "Google Cloud Translation"
         case .azure: return "Azure Translator"
+        case .zhipu: return "智谱 AI"
+        case .volcengine: return "火山方舟"
+        case .customChat: return "自定义兼容 API"
         }
     }
 
@@ -27,8 +33,13 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
         case .deepL: return "速度快，适合稳定的常规字幕翻译"
         case .google: return "语言覆盖广，适合多语种影视"
         case .azure: return "支持批量翻译、语言检测与企业区域端点"
+        case .zhipu: return "官方地址已内置，填写 API Key 即可使用预设模型"
+        case .volcengine: return "官方地址已内置，支持 API Key 或 AK / SK 鉴权"
+        case .customChat: return "配置 URL、API Key 和模型，使用 Chat Completions 翻译"
         }
     }
+
+    public var usesChatCompletions: Bool { [.zhipu, .volcengine, .customChat].contains(self) }
 
     public var requiresAPIKey: Bool { self != .apple && self != .openAI }
 }
@@ -46,11 +57,11 @@ public struct TranslationCredentialStore: Sendable {
     public static let shared = TranslationCredentialStore()
     private let service = "com.hviper.lovortplayer.translation-provider"
 
-    public func value(for provider: SubtitleTranslationProviderType) -> String {
+    public func value(for provider: SubtitleTranslationProviderType, field: String = "apiKey") -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue,
+            kSecAttrAccount as String: field == "apiKey" ? provider.rawValue : "\(provider.rawValue).\(field)",
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -60,11 +71,11 @@ public struct TranslationCredentialStore: Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    public func setValue(_ value: String, for provider: SubtitleTranslationProviderType) {
+    public func setValue(_ value: String, for provider: SubtitleTranslationProviderType, field: String = "apiKey") {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue
+            kSecAttrAccount as String: field == "apiKey" ? provider.rawValue : "\(provider.rawValue).\(field)"
         ]
         SecItemDelete(query as CFDictionary)
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -262,5 +273,144 @@ private extension String {
             .replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
             .replacingOccurrences(of: "&amp;", with: "&")
+    }
+}
+
+/// Non-secret configuration lives in defaults; credentials stay in Keychain.
+public struct TranslationAPISettings: Sendable {
+    public let provider: SubtitleTranslationProviderType
+    public var url: String
+    public var model: String
+    public var authenticationMode: VolcengineAuthenticationMode
+
+    public init(provider: SubtitleTranslationProviderType, defaults: UserDefaults = .standard) {
+        self.provider = provider
+        let prefix = "LovortTranslation.\(provider.rawValue)."
+        let preset: String
+        switch provider {
+        case .zhipu: preset = "https://open.bigmodel.cn/api/paas/v4"
+        case .volcengine: preset = "https://ark.cn-beijing.volces.com/api/v3"
+        default: preset = ""
+        }
+        url = provider == .customChat ? (defaults.string(forKey: prefix + "url") ?? "") : preset
+        let savedModel = defaults.string(forKey: prefix + "model") ?? ""
+        let defaultModel = provider == .zhipu ? "glm-4-flash-250414"
+            : provider == .volcengine ? "doubao-seed-2-0-mini-260428" : ""
+        model = savedModel.isEmpty ? defaultModel : savedModel
+        authenticationMode = provider == .volcengine
+            ? (VolcengineAuthenticationMode(rawValue: defaults.string(forKey: prefix + "authMode") ?? "") ?? .apiKey)
+            : .apiKey
+    }
+
+    public func save(defaults: UserDefaults = .standard) {
+        let prefix = "LovortTranslation.\(provider.rawValue)."
+        if provider == .customChat {
+            defaults.set(url.trimmingCharacters(in: .whitespacesAndNewlines), forKey: prefix + "url")
+        }
+        if provider == .volcengine { defaults.set(authenticationMode.rawValue, forKey: prefix + "authMode") }
+        defaults.set(model.trimmingCharacters(in: .whitespacesAndNewlines), forKey: prefix + "model")
+    }
+
+    public func endpoint() throws -> URL {
+        let baseURL: String
+        switch provider {
+        case .zhipu: baseURL = "https://open.bigmodel.cn/api/paas/v4"
+        case .volcengine: baseURL = "https://ark.cn-beijing.volces.com/api/v3"
+        default: baseURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard var components = URLComponents(string: baseURL),
+              components.scheme == "https", let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw NSError(domain: "TranslationConfiguration", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "请填写有效的 HTTPS API 地址（不含账号、查询参数或片段）"])
+        }
+        var path = components.path
+        while path.hasSuffix("/") { path.removeLast() }
+        if !path.hasSuffix("/chat/completions") { path += "/chat/completions" }
+        components.path = path
+        guard let endpoint = components.url else { throw URLError(.badURL) }
+        return endpoint
+    }
+
+    public var cacheIdentity: String? {
+        provider.usesChatCompletions ? "\(provider.rawValue)|\((try? endpoint().absoluteString) ?? url)|\(model)|\(authenticationMode.rawValue)" : nil
+    }
+
+    public static func effectiveProvider(_ provider: SubtitleTranslationProviderType, hasCredential: Bool) -> SubtitleTranslationProviderType {
+        provider != .apple && !hasCredential ? .apple : provider
+    }
+}
+
+public struct ChatCompletionTranslationProvider: SubtitleTranslationProviding {
+    public let settings: TranslationAPISettings
+    public let apiKey: String
+    private let session: URLSession
+
+    public init(settings: TranslationAPISettings, apiKey: String, session: URLSession? = nil) {
+        self.settings = settings
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 90
+        self.session = session ?? URLSession(configuration: configuration)
+    }
+
+    public func translate(lines: [SubtitleLine], sourceLanguage: SubtitleSourceLanguage,
+                          targetLanguage: String, onProgress: (@Sendable (String) -> Void)?) async throws -> [SubtitleLine] {
+        guard !lines.isEmpty else { return [] }
+        let endpoint = try settings.endpoint()
+        let model = settings.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty, !model.isEmpty else {
+            throw NSError(domain: "TranslationConfiguration", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "请在翻译 API 管理中填写 API Key 和模型 ID（火山可填写接入点 ID）"])
+        }
+        var result = lines
+        let batchSize = 24
+        let total = (lines.count + batchSize - 1) / batchSize
+        for start in stride(from: 0, to: lines.count, by: batchSize) {
+            try Task.checkCancellation()
+            let end = min(start + batchSize, lines.count)
+            onProgress?("正在使用 \(settings.provider.displayName) 翻译 \(start / batchSize + 1)/\(total)...")
+            let input = lines[start..<end].enumerated().map { ["index": $0.offset, "text": $0.element.originalText] as [String: Any] }
+            let json = String(decoding: try JSONSerialization.data(withJSONObject: input), as: UTF8.self)
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "stream": false,
+                "messages": [
+                    ["role": "system", "content": "你是影视字幕译者。将用户提供的台词翻译为\(targetLanguage)，保留每一条，结合上下文处理称谓和语气。只返回 JSON 数组，每项包含 index 和非空 translation，不要 Markdown。"],
+                    ["role": "user", "content": json]
+                ]
+            ])
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200...299).contains(status) else {
+                // Do not echo server payloads which may contain credentials or subtitle text.
+                throw NSError(domain: "TranslationAPI", code: status,
+                              userInfo: [NSLocalizedDescriptionKey: "\(settings.provider.displayName) 请求失败（HTTP \(status)），请检查地址、Key、模型和额度"])
+            }
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = root["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                throw NSError(domain: "TranslationAPI", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "API 未返回有效的 Chat Completions 文本"])
+            }
+            let values = try CloudAISubtitleService.decodeTranslations(from: content, expectedCount: end - start)
+            for (offset, value) in values.enumerated() {
+                let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    throw NSError(domain: "TranslationAPI", code: -4,
+                                  userInfo: [NSLocalizedDescriptionKey: "API 返回空译文，已保留原文字幕"])
+                }
+                let line = lines[start + offset]
+                result[start + offset] = SubtitleLine(id: line.id, startTime: line.startTime,
+                    endTime: line.endTime, originalText: line.originalText, translatedText: text)
+            }
+        }
+        return result
     }
 }

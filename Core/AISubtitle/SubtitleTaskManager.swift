@@ -147,7 +147,7 @@ public final class SubtitleTaskManager: ObservableObject {
         forceRegenerate: Bool = false
     ) -> UUID {
         let selectedModel = model ?? AISubtitleCoordinator.shared.offlineModel
-        let selectedProvider = translationProvider ?? AISubtitleCoordinator.shared.translationProvider
+        let selectedProvider = AISubtitleCoordinator.shared.effectiveTranslationProvider(translationProvider ?? AISubtitleCoordinator.shared.translationProvider)
         let selectedEnhancement = enhanceWithGPT ?? AISubtitleCoordinator.shared.isGPTEnhancementEnabled
         if let index = tasks.firstIndex(where: {
             videoKey($0.videoURL) == videoKey(videoURL) && $0.phase.isActive
@@ -180,7 +180,8 @@ public final class SubtitleTaskManager: ObservableObject {
                translationProvider: selectedProvider,
                enhanceWithGPT: selectedEnhancement
            ),
-           SubtitleCacheStore().load(for: videoURL) != nil {
+           let cached = SubtitleCacheStore().load(for: videoURL),
+           cached.translationConfiguration == TranslationAPISettings(provider: selectedProvider).cacheIdentity {
             return existing.id
         }
 

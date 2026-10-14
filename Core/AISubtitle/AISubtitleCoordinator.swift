@@ -190,7 +190,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     ) async throws -> [SubtitleLine] {
         let selectedEngine = engine ?? currentEngine
         let selectedModel = model ?? offlineModel
-        let selectedTranslationProvider = translationProvider ?? self.translationProvider
+        let selectedTranslationProvider = effectiveTranslationProvider(translationProvider ?? self.translationProvider)
+        let translationSettings = TranslationAPISettings(provider: selectedTranslationProvider)
         let shouldEnhanceWithGPT = enhanceWithGPT ?? isGPTEnhancementEnabled
 
         let cachedDocument = cacheStore.load(for: videoURL)
@@ -203,6 +204,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                cachedDocument.engine == selectedEngine,
                cachedDocument.model == expectedModel,
                cachedDocument.translationProvider == selectedTranslationProvider,
+               cachedDocument.translationConfiguration == translationSettings.cacheIdentity,
                cachedDocument.translationComplete != false,
                (cachedDocument.gptEnhanced ?? false) == (selectedTranslationProvider == .openAI || shouldEnhanceWithGPT) {
                 onProgress?("已加载匹配当前配置的本地字幕（共 \(cachedDocument.lines.count) 句）")
@@ -221,7 +223,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                   cachedDocument.sourceLanguage == sourceLanguage.rawValue,
                   cachedDocument.engine == selectedEngine,
                   cachedDocument.model == expectedModel else { return nil }
-            let keepTranslations = cachedDocument.translationProvider == selectedTranslationProvider
+            let keepTranslations = cachedDocument.translationConfiguration == translationSettings.cacheIdentity
+                && cachedDocument.translationProvider == selectedTranslationProvider
                 && cachedDocument.targetLanguage == targetLanguage
             return cachedDocument.lines.map {
                 SubtitleLine(
@@ -246,7 +249,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
 
         let initialLines: [SubtitleLine] = {
             guard let resumableDocument else { return [] }
-            let keepTranslations = resumableDocument.translationProvider == selectedTranslationProvider
+            let keepTranslations = resumableDocument.translationConfiguration == translationSettings.cacheIdentity
+                && resumableDocument.translationProvider == selectedTranslationProvider
                 && resumableDocument.targetLanguage == targetLanguage
             if keepTranslations {
                 return resumableDocument.lines
@@ -258,6 +262,13 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }()
 
         let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+        let translationService: Result<any SubtitleTranslationProviding, Error>
+        do {
+            translationService = .success(try await resolveTranslationService(provider: selectedTranslationProvider,
+                platformKey: platformKey, settings: translationSettings))
+        } catch {
+            translationService = .failure(error)
+        }
         let originalLines: [SubtitleLine]
         if let reusableOriginalLines {
             originalLines = reusableOriginalLines
@@ -285,6 +296,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             engine: selectedEngine,
                             model: expectedModel,
                             translationProvider: selectedTranslationProvider,
+                            translationConfiguration: translationSettings.cacheIdentity,
                             isComplete: false,
                             translationComplete: false,
                             gptEnhanced: false,
@@ -343,6 +355,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             engine: selectedEngine,
             model: expectedModel,
             translationProvider: selectedTranslationProvider,
+            translationConfiguration: translationSettings.cacheIdentity,
             isComplete: true,
             translationComplete: false,
             gptEnhanced: false,
@@ -352,15 +365,13 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         _ = try cacheStore.save(originalDocument, for: videoURL)
         saveSRTBestEffort(lines: originalLines, videoURL: videoURL, suffix: "source")
 
+        await onPartialResult?(originalLines)
         var finalLines = originalLines
         var translationWarning: String?
         var translationComplete = false
         var gptEnhanced = false
         do {
-            let service = try await resolveTranslationService(
-                provider: selectedTranslationProvider,
-                platformKey: platformKey
-            )
+            let service = try translationService.get()
             let untranslatedLines = finalLines.filter { ($0.translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             if !untranslatedLines.isEmpty {
                 let translated = try await service.translate(
@@ -403,6 +414,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             engine: selectedEngine,
             model: expectedModel,
             translationProvider: selectedTranslationProvider,
+            translationConfiguration: translationSettings.cacheIdentity,
             isComplete: true,
             translationComplete: translationComplete,
             gptEnhanced: gptEnhanced,
@@ -595,11 +607,23 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             && error.localizedDescription.contains("未检测到清晰人声")
     }
 
+    public func effectiveTranslationProvider(_ provider: SubtitleTranslationProviderType) -> SubtitleTranslationProviderType {
+        if provider == .volcengine, TranslationAPISettings(provider: provider).authenticationMode == .accessKey {
+            let credentials = VolcengineAccessCredentials.saved()
+            return TranslationAPISettings.effectiveProvider(provider, hasCredential: !credentials.isEmpty)
+        }
+        let key = provider == .openAI ? getSavedOpenAIKey() : TranslationCredentialStore.shared.value(for: provider)
+        return TranslationAPISettings.effectiveProvider(provider, hasCredential: !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     private func resolveTranslationService(
         provider: SubtitleTranslationProviderType,
-        platformKey: String
+        platformKey: String,
+        settings: TranslationAPISettings? = nil
     ) async throws -> any SubtitleTranslationProviding {
-        switch provider {
+        let selectedProvider = settings?.provider ?? effectiveTranslationProvider(provider)
+        let configuration = settings ?? TranslationAPISettings(provider: selectedProvider)
+        switch selectedProvider {
         case .apple:
             return await AppleTranslationBridge.shared
         case .openAI:
@@ -611,6 +635,12 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                 )
             }
             return OpenAITranslationProvider(token: platformKey)
+        case .volcengine where configuration.authenticationMode == .accessKey:
+            return VolcengineAccessKeyTranslationProvider(settings: configuration,
+                credentials: VolcengineAccessCredentials.saved())
+        case .zhipu, .volcengine, .customChat:
+            return ChatCompletionTranslationProvider(settings: configuration,
+                apiKey: TranslationCredentialStore.shared.value(for: provider))
         case .deepL, .google, .azure:
             let key = TranslationCredentialStore.shared.value(for: provider)
             let region = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""

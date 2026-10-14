@@ -1,4 +1,5 @@
 import SwiftUI
+import Translation
 import KSPlayer
 #if os(iOS)
 import UIKit
@@ -6,6 +7,7 @@ import UIKit
 
 public struct FullscreenVideoPlayerView: View {
     @StateObject public var viewModel = PlayerViewModel()
+    @ObservedObject private var appleTranslation = AppleTranslationBridge.shared
     @ObservedObject private var settings = AppSettings.shared
     public let videoURL: URL
     public let videoTitle: String
@@ -167,6 +169,9 @@ public struct FullscreenVideoPlayerView: View {
                 .animation(.easeInOut(duration: 0.25), value: viewModel.showControls)
                 .animation(.easeInOut(duration: 0.25), value: viewModel.isClipMode)
             }
+        }
+        .translationTask(appleTranslation.configuration) { session in
+            await appleTranslation.perform(using: session)
         }
         .onAppear {
             viewModel.loadVideo(url: videoURL, isPrivate: isPrivate)

@@ -135,6 +135,7 @@ public struct AISubtitleSettingsSheet: View {
                 Text("输入 OpenAI Platform 项目可用的模型 ID，设定后用于影视字幕翻译或语境精修。")
             }
             .onAppear {
+                self.selectedTranslationProvider = AISubtitleCoordinator.shared.translationProvider
                 self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
                 self.proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
                 let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
@@ -546,6 +547,11 @@ public struct AISubtitleSettingsSheet: View {
                 Label("语言包准备完成后，翻译在设备端进行，不上传字幕文本。", systemImage: "iphone.and.arrow.forward")
                     .font(.system(size: 11))
                     .foregroundColor(.green.opacity(0.85))
+            } else if selectedTranslationProvider.usesChatCompletions {
+                NavigationLink("管理翻译服务与凭证") {
+                    TranslationAPIManagementView()
+                }
+                .foregroundColor(AppSettings.shared.themeColor.color)
             } else if selectedTranslationProvider.requiresAPIKey {
                 SecureField("\(selectedTranslationProvider.displayName) API Key", text: $translationAPIKey)
                     .font(.system(size: 13, design: .monospaced))
