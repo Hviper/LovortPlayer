@@ -110,9 +110,11 @@ public struct OfflineSubtitleSettingsView: View {
                     ProgressView(value: record.progress)
                         .tint(AppSettings.shared.themeColor.color)
                     HStack {
-                        Text("正在下载 \(Int(record.progress * 100))%")
+                        Text(record.progress >= 0.999
+                             ? "正在校验并安装模型…"
+                             : "正在下载 \(Int(record.progress * 100))%")
                         Spacer()
-                        Text("\(formattedBytes(record.completedBytes)) / \(formattedBytes(record.totalBytes))")
+                        Text("约 \(formattedBytes(record.completedBytes)) / \(formattedBytes(record.totalBytes))")
                     }
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.45))

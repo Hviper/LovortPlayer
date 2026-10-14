@@ -98,6 +98,37 @@ final class SubtitlePipelineTests: XCTestCase {
         ))
     }
 
+    func testOfflineModelProgressUsesEstimatedBytesInsteadOfWhisperFileCounts() {
+        let metrics = OfflineWhisperModelManager.downloadMetrics(fraction: 0.25, model: .balanced)
+
+        XCTAssertEqual(metrics.fraction, 0.25)
+        XCTAssertEqual(metrics.completedBytes, 60 * 1_024 * 1_024)
+        XCTAssertEqual(metrics.totalBytes, 240 * 1_024 * 1_024)
+    }
+
+    func testOfflineModelFolderRecognitionSupportsWhisperKitPrefix() {
+        XCTAssertTrue(OfflineWhisperModelManager.modelFolderName("base", matches: .compact))
+        XCTAssertTrue(OfflineWhisperModelManager.modelFolderName("openai_whisper-base", matches: .compact))
+        XCTAssertTrue(OfflineWhisperModelManager.modelFolderName(
+            "openai_whisper-large-v3-v20240930_626MB",
+            matches: .highAccuracy
+        ))
+        XCTAssertFalse(OfflineWhisperModelManager.modelFolderName("openai_whisper-small.en", matches: .balanced))
+    }
+
+    func testPartialOfflineModelDirectoryIsNotTreatedAsInstalled() {
+        XCTAssertTrue(OfflineWhisperModelManager.containsRequiredModelComponents(fileNames: [
+            "MelSpectrogram.mlmodelc",
+            "AudioEncoder.mlmodelc",
+            "TextDecoder.mlmodelc"
+        ]))
+        XCTAssertFalse(OfflineWhisperModelManager.containsRequiredModelComponents(fileNames: [
+            "config.json",
+            "MelSpectrogram.mlmodelc",
+            "AudioEncoder.mlmodelc"
+        ]))
+    }
+
     func testLanguageMapping() {
         XCTAssertEqual(SubtitleSourceLanguage.japanese.whisperCode, "ja")
         XCTAssertEqual(SubtitleSourceLanguage.english.whisperCode, "en")

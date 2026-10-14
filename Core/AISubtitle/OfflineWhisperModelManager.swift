@@ -52,6 +52,12 @@ public struct OfflineModelInstallRecord: Codable, Sendable {
     public var errorMessage: String?
 }
 
+struct OfflineModelDownloadMetrics: Equatable {
+    let fraction: Double
+    let completedBytes: Int64
+    let totalBytes: Int64
+}
+
 @MainActor
 public final class OfflineWhisperModelManager: ObservableObject {
     public static let shared = OfflineWhisperModelManager()
@@ -59,6 +65,7 @@ public final class OfflineWhisperModelManager: ObservableObject {
     @Published public private(set) var records: [OfflineWhisperModel: OfflineModelInstallRecord] = [:]
 
     private var preparationTasks: [OfflineWhisperModel: Task<URL, Error>] = [:]
+    private var preparationTokens: [OfflineWhisperModel: UUID] = [:]
     private let defaultsKey = "LovortOfflineWhisperModelRecords"
 
     public static var modelsDirectory: URL {
@@ -112,26 +119,35 @@ public final class OfflineWhisperModelManager: ObservableObject {
             record.errorMessage = nil
         }
 
+        let preparationToken = UUID()
+        preparationTokens[model] = preparationToken
         let task = Task<URL, Error> { [weak self] in
             do {
                 let folder = try await WhisperKit.download(
                     variant: model.rawValue,
                     downloadBase: Self.modelsDirectory,
-                    useBackgroundSession: true,
+                    useBackgroundSession: false,
                     progressCallback: { [weak self] progress in
                         Task { @MainActor in
-                            guard let self else { return }
+                            guard let self,
+                                  self.preparationTokens[model] == preparationToken else { return }
+                            let metrics = Self.downloadMetrics(
+                                fraction: progress.fractionCompleted,
+                                model: model
+                            )
                             self.update(model) { record in
+                                guard record.state == .downloading else { return }
                                 record.state = .downloading
-                                record.progress = progress.fractionCompleted.isFinite
-                                    ? min(1, max(0, progress.fractionCompleted))
-                                    : record.progress
-                                record.completedBytes = progress.completedUnitCount
-                                if progress.totalUnitCount > 0 { record.totalBytes = progress.totalUnitCount }
+                                record.progress = metrics.fraction
+                                record.completedBytes = metrics.completedBytes
+                                record.totalBytes = metrics.totalBytes
                             }
                         }
                     }
                 )
+                guard self?.preparationTokens[model] == preparationToken else {
+                    throw CancellationError()
+                }
                 self?.update(model) { record in
                     record.state = .installed
                     record.progress = 1
@@ -142,9 +158,17 @@ public final class OfflineWhisperModelManager: ObservableObject {
                 }
                 return folder
             } catch {
-                self?.update(model) { record in
-                    record.state = .failed
-                    record.errorMessage = error.localizedDescription
+                if self?.preparationTokens[model] == preparationToken {
+                    self?.update(model) { record in
+                        if error is CancellationError {
+                            record.state = .notInstalled
+                            record.progress = 0
+                            record.completedBytes = 0
+                        } else {
+                            record.state = .failed
+                            record.errorMessage = error.localizedDescription
+                        }
+                    }
                 }
                 throw error
             }
@@ -152,7 +176,9 @@ public final class OfflineWhisperModelManager: ObservableObject {
         preparationTasks[model] = task
         Task { [weak self] in
             _ = await task.result
+            guard self?.preparationTokens[model] == preparationToken else { return }
             self?.preparationTasks[model] = nil
+            self?.preparationTokens[model] = nil
         }
         return try await waitForPreparation(task)
     }
@@ -163,6 +189,7 @@ public final class OfflineWhisperModelManager: ObservableObject {
         }
         preparationTasks[model]?.cancel()
         preparationTasks[model] = nil
+        preparationTokens[model] = nil
         if let path = record(for: model).folderPath {
             let target = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
             let root = Self.modelsDirectory.standardizedFileURL
@@ -187,19 +214,25 @@ public final class OfflineWhisperModelManager: ObservableObject {
     public func refreshInstalledState() {
         for model in OfflineWhisperModel.allCases {
             var record = records[model] ?? self.record(for: model)
-            if let discovered = discoverInstalledFolder(for: model) {
+            let recordedFolder = record.folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            if record.state == .installed,
+               let recordedFolder,
+               isUsableModelFolder(recordedFolder) {
+                record.state = .installed
+                record.progress = 1
+                record.completedBytes = directorySize(recordedFolder)
+                record.totalBytes = max(record.completedBytes, model.estimatedSizeBytes)
+                record.errorMessage = nil
+            } else if preparationTasks[model] != nil {
+                record.state = .downloading
+            } else if let discovered = discoverInstalledFolder(for: model) {
                 record.state = .installed
                 record.progress = 1
                 record.folderPath = discovered.path
                 record.completedBytes = directorySize(discovered)
                 record.totalBytes = max(record.completedBytes, record.totalBytes)
                 record.errorMessage = nil
-            } else if record.state == .downloading {
-                record.state = .notInstalled
-            }
-            if record.state == .installed,
-               let path = record.folderPath,
-               !FileManager.default.fileExists(atPath: path) {
+            } else if record.state == .downloading || record.state == .installed {
                 record.state = .notInstalled
                 record.progress = 0
                 record.completedBytes = 0
@@ -208,6 +241,26 @@ public final class OfflineWhisperModelManager: ObservableObject {
             records[model] = record
         }
         saveRecords()
+    }
+
+    static func downloadMetrics(fraction: Double, model: OfflineWhisperModel) -> OfflineModelDownloadMetrics {
+        let normalized = fraction.isFinite ? min(1, max(0, fraction)) : 0
+        return OfflineModelDownloadMetrics(
+            fraction: normalized,
+            completedBytes: Int64(Double(model.estimatedSizeBytes) * normalized),
+            totalBytes: model.estimatedSizeBytes
+        )
+    }
+
+    static func modelFolderName(_ folderName: String, matches model: OfflineWhisperModel) -> Bool {
+        folderName == model.rawValue || folderName == "openai_whisper-\(model.rawValue)"
+    }
+
+    static func containsRequiredModelComponents(fileNames: [String]) -> Bool {
+        let requiredPrefixes = ["MelSpectrogram.", "AudioEncoder.", "TextDecoder."]
+        return requiredPrefixes.allSatisfy { prefix in
+            fileNames.contains { $0.hasPrefix(prefix) }
+        }
     }
 
     private func waitForPreparation(_ task: Task<URL, Error>) async throws -> URL {
@@ -231,12 +284,22 @@ public final class OfflineWhisperModelManager: ObservableObject {
             options: [.skipsHiddenFiles]
         ) else { return nil }
         for case let url as URL in enumerator {
-            guard url.lastPathComponent == model.rawValue,
-                  (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
-                  directorySize(url) > 0 else { continue }
+            guard Self.modelFolderName(url.lastPathComponent, matches: model),
+                  isUsableModelFolder(url) else { continue }
             return url
         }
         return nil
+    }
+
+    private func isUsableModelFolder(_ url: URL) -> Bool {
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+              let enumerator = FileManager.default.enumerator(
+                  at: url,
+                  includingPropertiesForKeys: nil,
+                  options: [.skipsHiddenFiles]
+              ) else { return false }
+        let names = enumerator.compactMap { ($0 as? URL)?.lastPathComponent }
+        return Self.containsRequiredModelComponents(fileNames: names)
     }
 
     private func update(_ model: OfflineWhisperModel, _ mutation: (inout OfflineModelInstallRecord) -> Void) {
