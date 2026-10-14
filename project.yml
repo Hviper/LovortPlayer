@@ -22,7 +22,7 @@ settings:
     CODE_SIGNING_ALLOWED: "NO"
 targets:
   LovortPlayerCore:
-    type: framework
+    type: framework.static
     platform: iOS
     sources: [Core]
     settings:
@@ -42,8 +42,7 @@ targets:
     sources: [App, Views]
     dependencies:
       - target: LovortPlayerCore
-      - package: ksplayer
-        product: KSPlayer
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hviper.lovortplayer
@@ -56,6 +55,7 @@ targets:
     sources: [Tests]
     dependencies:
       - target: LovortPlayerCore
+        embed: false
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES

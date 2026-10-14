@@ -29,13 +29,28 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
+      - name: Restore Swift Package Sources
+        id: packages-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/SourcePackages
+          key: ${{ runner.os }}-spm-xcode26-${{ hashFiles('Package.resolved') }}
+
       - name: Resolve Swift Packages
         run: |
           mkdir -p LovortPlayer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
           cp Package.resolved LovortPlayer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
           xcodebuild -resolvePackageDependencies \
             -project LovortPlayer.xcodeproj \
-            -scheme LovortPlayer
+            -scheme LovortPlayer \
+            -clonedSourcePackagesDirPath build/SourcePackages
+
+      - name: Cache Resolved Swift Package Sources
+        if: steps.packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/SourcePackages
+          key: ${{ runner.os }}-spm-xcode26-${{ hashFiles('Package.resolved') }}
 
       - name: Run iOS Core Tests
         run: |
@@ -45,6 +60,7 @@ jobs:
             -scheme LovortPlayer \
             -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -derivedDataPath build/TestDerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages \
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO
 
@@ -56,6 +72,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -configuration Release \
             -derivedDataPath build/DerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
