@@ -2,6 +2,7 @@ name: LovortPlayer
 options:
   bundleIdPrefix: com.hviper
   xcodeVersion: "15.0"
+  transitivelyLinkDependencies: true
   deploymentTarget:
     iOS: "18.0"
 packages:
