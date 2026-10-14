@@ -11,6 +11,9 @@ packages:
   ksplayer:
     url: https://github.com/kingslay/KSPlayer.git
     exactVersion: "2.3.4"
+  zipfoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    exactVersion: "0.9.20"
 targets:
   LovortPlayer:
     type: application
@@ -25,6 +28,8 @@ targets:
         product: WhisperKit
       - package: ksplayer
         product: KSPlayer
+      - package: zipfoundation
+        product: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.hviper.lovortplayer"

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 public struct OfflineSubtitleSettingsView: View {
@@ -7,6 +8,10 @@ public struct OfflineSubtitleSettingsView: View {
     @AppStorage("settings.subtitleCompletionNotifications") private var notificationsEnabled = false
     @State private var modelToDelete: OfflineWhisperModel?
     @State private var notificationMessage: String?
+    @State private var isImportingModel = false
+    @State private var transferringModel: OfflineWhisperModel?
+    @State private var isInstallingArchive = false
+    @State private var exportedArchives: [OfflineWhisperModel: URL] = [:]
 
     public init() {}
 
@@ -24,6 +29,31 @@ public struct OfflineSubtitleSettingsView: View {
                             .foregroundColor(.white.opacity(0.4))
                     }
 
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button {
+                            isImportingModel = true
+                        } label: {
+                            Label("从文件导入离线模型", systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isInstallingArchive)
+                        Text("可从另一台设备分享模型 ZIP 包并导入，无需重新下载。导入时请预留约两倍模型大小的空间。")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.5))
+                        if isInstallingArchive {
+                            ProgressView("正在校验并安装模型…")
+                                .tint(AppSettings.shared.themeColor.color)
+                        }
+                        if let notificationMessage {
+                            Text(notificationMessage)
+                                .font(.system(size: 11))
+                                .foregroundColor(.orange.opacity(0.9))
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.055)))
+
                     ForEach(OfflineWhisperModel.allCases) { model in
                         modelCard(model)
                     }
@@ -38,11 +68,6 @@ public struct OfflineSubtitleSettingsView: View {
                         Text("App 内完成提示始终开启。系统通知需要用户授权，仅在任务实际完成时发送。")
                             .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.45))
-                        if let notificationMessage {
-                            Text(notificationMessage)
-                                .font(.system(size: 11))
-                                .foregroundColor(.orange.opacity(0.9))
-                        }
                     }
                     .padding(16)
                     .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.055)))
@@ -55,6 +80,23 @@ public struct OfflineSubtitleSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .onAppear { models.refreshInstalledState() }
+        .fileImporter(isPresented: $isImportingModel, allowedContentTypes: [.zip]) { result in
+            switch result {
+            case .success(let url):
+                isInstallingArchive = true
+                Task {
+                    defer { isInstallingArchive = false }
+                    do {
+                        let model = try await models.importArchive(from: url)
+                        notificationMessage = "已导入 \(model.displayName)，可以离线使用"
+                    } catch {
+                        notificationMessage = "模型导入失败：\(error.localizedDescription)"
+                    }
+                }
+            case .failure(let error):
+                notificationMessage = "无法打开模型文件：\(error.localizedDescription)"
+            }
+        }
         .confirmationDialog(
             "删除离线模型？",
             isPresented: Binding(
@@ -139,6 +181,33 @@ public struct OfflineSubtitleSettingsView: View {
                     }
                     Button("删除", role: .destructive) { modelToDelete = model }
                         .buttonStyle(.bordered)
+                    if let archiveURL = exportedArchives[model] {
+                        ShareLink(item: archiveURL) {
+                            Label("分享模型", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Button {
+                            transferringModel = model
+                            Task {
+                                defer { transferringModel = nil }
+                                do {
+                                    exportedArchives[model] = try await models.exportArchive(for: model)
+                                    notificationMessage = "模型包已准备好，点击“分享模型”保存或发送"
+                                } catch {
+                                    notificationMessage = "模型打包失败：\(error.localizedDescription)"
+                                }
+                            }
+                        } label: {
+                            if transferringModel == model {
+                                ProgressView()
+                            } else {
+                                Label("准备分享", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(transferringModel != nil)
+                    }
                 } else if record.state != .downloading {
                     Button(record.state == .failed ? "重试下载" : "预先下载") {
                         models.beginDownload(model)

@@ -21,6 +21,7 @@ public enum AISubtitleEngineType: String, CaseIterable, Codable, Identifiable, S
 public struct SubtitlePreviewResult: Sendable {
     public let startTime: TimeInterval
     public let endTime: TimeInterval
+    public let elapsedTime: TimeInterval
     public let lines: [SubtitleLine]
     public let translationWarning: String?
 }
@@ -257,11 +258,6 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }()
 
         let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
-        let streamingTranslationService = try? await resolveTranslationService(
-            provider: selectedTranslationProvider,
-            platformKey: platformKey
-        )
-
         let originalLines: [SubtitleLine]
         if let reusableOriginalLines {
             originalLines = reusableOriginalLines
@@ -269,7 +265,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         } else {
             switch selectedEngine {
             case .localWhisperKit:
-                originalLines = try await localService.transcribe(
+                originalLines = try await localService.transcribeProgressively(
                     audioURL: videoURL,
                     sourceLanguage: sourceLanguage,
                     model: selectedModel,
@@ -283,22 +279,6 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             await onPartialResult?(update.lines)
                         }
                         guard !update.completedChunkIndexes.isEmpty else { return update.lines }
-                        var mergedLines = update.lines
-                        if let streamingTranslationService, !update.latestChunkLines.isEmpty {
-                            onProgress?("正在流式翻译第 \(update.completedChunkIndexes.count)/\(update.totalChunkCount) 个字幕分片 (\(update.latestChunkLines.count) 句)...")
-                            if let translatedChunk = try? await streamingTranslationService.translate(
-                                lines: update.latestChunkLines,
-                                sourceLanguage: sourceLanguage,
-                                targetLanguage: targetLanguage,
-                                onProgress: nil
-                            ) {
-                                let translatedByID = Dictionary(uniqueKeysWithValues: translatedChunk.map { ($0.id, $0) })
-                                mergedLines = mergedLines.map { line in
-                                    translatedByID[line.id] ?? line
-                                }
-                                await onPartialResult?(mergedLines)
-                            }
-                        }
                         let partialDocument = SubtitleDocument(
                             sourceLanguage: sourceLanguage.rawValue,
                             targetLanguage: targetLanguage,
@@ -311,10 +291,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             completedChunkIndexes: update.completedChunkIndexes,
                             chunkDuration: LocalWhisperSubtitleService.chunkDuration,
                             videoURL: videoURL,
-                            lines: mergedLines
+                            lines: update.lines
                         )
                         _ = try? cacheStore.save(partialDocument, for: videoURL)
-                        return mergedLines
+                        return update.lines
                     }
                 )
             case .cloudOpenAI:
@@ -463,6 +443,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         targetLanguage: String,
         onProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SubtitlePreviewResult {
+        let startedAt = Date()
         guard await OfflineWhisperModelManager.shared.installedFolder(for: model) != nil else {
             throw NSError(domain: "SubtitlePreview", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "请先在设置中安装所选离线模型"])
@@ -541,6 +522,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }
         try Task.checkCancellation()
         return SubtitlePreviewResult(startTime: begin, endTime: begin + length,
+                                     elapsedTime: Date().timeIntervalSince(startedAt),
                                      lines: resultLines, translationWarning: warning)
     }
 

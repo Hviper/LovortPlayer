@@ -1,5 +1,66 @@
 import SwiftUI
 
+@MainActor
+private final class SubtitlePreviewController: ObservableObject {
+    @Published var isRunning = false
+    @Published var status = ""
+    @Published var result: SubtitlePreviewResult?
+    @Published var errorMessage: String?
+    private var task: Task<Void, Never>?
+    private var runID = UUID()
+
+    func start(videoURL: URL, startTime: TimeInterval, language: SubtitleSourceLanguage,
+               model: OfflineWhisperModel, provider: SubtitleTranslationProviderType,
+               targetLanguage: String) {
+        task?.cancel()
+        let currentRun = UUID()
+        runID = currentRun
+        result = nil
+        errorMessage = nil
+        status = "正在准备 30 秒预览…"
+        isRunning = true
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.runID == currentRun {
+                    self.isRunning = false
+                    self.task = nil
+                }
+            }
+            do {
+                let result = try await AISubtitleCoordinator.shared.previewLocalVideo(
+                    videoURL: videoURL, startTime: startTime,
+                    sourceLanguage: language, model: model,
+                    translationProvider: provider, targetLanguage: targetLanguage,
+                    onProgress: { [weak self] message in
+                        Task { @MainActor in
+                            guard let self, self.runID == currentRun, self.isRunning else { return }
+                            self.status = message
+                        }
+                    }
+                )
+                guard self.runID == currentRun, !Task.isCancelled else { return }
+                self.result = result
+                self.status = "预览完成"
+            } catch is CancellationError {
+                if self.runID == currentRun { self.status = "预览已取消" }
+            } catch {
+                guard self.runID == currentRun else { return }
+                self.errorMessage = error.localizedDescription
+                self.status = "预览失败"
+            }
+        }
+    }
+
+    func cancel() {
+        runID = UUID()
+        task?.cancel()
+        task = nil
+        isRunning = false
+        status = "预览已取消"
+    }
+}
+
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
     @ObservedObject private var modelManager = AIModelManager.shared
@@ -19,6 +80,7 @@ public struct AISubtitleSettingsSheet: View {
     @State private var communityMatchStatus: String = ""
     @State private var showCustomModelSheet: Bool = false
     @State private var customModelText: String = ""
+    @StateObject private var preview = SubtitlePreviewController()
 
     public init(viewModel: PlayerViewModel) {
         self.viewModel = viewModel
@@ -86,6 +148,7 @@ public struct AISubtitleSettingsSheet: View {
                 self.translationAPIKey = TranslationCredentialStore.shared.value(for: selectedTranslationProvider)
                 self.azureRegion = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
             }
+            .onDisappear { preview.cancel() }
         }
     }
 
@@ -204,7 +267,7 @@ public struct AISubtitleSettingsSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频，分片生成后立即显示原文字幕并持续向后处理。模型首次使用需联网下载，之后可完全离线转写。")
+            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频。每个分片识别完成后即可显示原文，全部识别完后再翻译。模型首次使用需联网下载，之后可离线转写。")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -299,6 +362,65 @@ public struct AISubtitleSettingsSheet: View {
             }
 
             VStack(spacing: 10) {
+                if selectedEngine == .localWhisperKit {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Button {
+                            if preview.isRunning {
+                                preview.cancel()
+                                return
+                            }
+                            guard let videoURL = viewModel.currentVideoURL else { return }
+                            preview.start(
+                                videoURL: videoURL, startTime: viewModel.currentTime,
+                                language: selectedSourceLanguage, model: selectedOfflineModel,
+                                provider: selectedTranslationProvider,
+                                targetLanguage: selectedTargetLanguage
+                            )
+                        } label: {
+                            HStack {
+                                if preview.isRunning { ProgressView().tint(.white) }
+                                Label(preview.isRunning ? "取消预览" : "预览当前播放位置附近 30 秒字幕",
+                                      systemImage: preview.isRunning ? "xmark.circle" : "text.bubble")
+                            }
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isGeneratingSubtitles && !preview.isRunning)
+                        if !preview.status.isEmpty {
+                            Text(preview.status)
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.65))
+                        }
+                        if let error = preview.errorMessage {
+                            Text(error).font(.system(size: 11)).foregroundColor(.orange)
+                        }
+                        if let result = preview.result {
+                            Text("预览区间：\(Int(result.startTime))–\(Int(result.endTime)) 秒 · \(result.lines.count) 句")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white.opacity(0.7))
+                            Text("预览耗时 \(Int(result.elapsedTime.rounded())) 秒（含模型加载和翻译）")
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.6))
+                            if let warning = result.translationWarning {
+                                Text(warning).font(.system(size: 11)).foregroundColor(.orange)
+                            }
+                            ForEach(result.lines.prefix(8)) { line in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(line.originalText).foregroundColor(.white)
+                                    if let translated = line.translatedText {
+                                        Text(translated).foregroundColor(.cyan)
+                                    }
+                                }
+                                .font(.system(size: 12))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
+                }
+
                 // 社区精校字幕 (射手网 / 字幕组) 一键匹配
                 Button(action: {
                     Task {

@@ -19,14 +19,16 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", exact: "1.1.1"),
-        .package(url: "https://github.com/kingslay/KSPlayer.git", exact: "2.3.4")
+        .package(url: "https://github.com/kingslay/KSPlayer.git", exact: "2.3.4"),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
     ],
     targets: [
         .target(
             name: "LovortPlayerCore",
             dependencies: [
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
-                .product(name: "KSPlayer", package: "KSPlayer")
+                .product(name: "KSPlayer", package: "KSPlayer"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Core"
         ),

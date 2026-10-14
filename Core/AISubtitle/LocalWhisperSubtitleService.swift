@@ -203,8 +203,39 @@ public actor LocalWhisperSubtitleService {
         existingLines: [SubtitleLine] = [],
         completedChunkIndexes: Set<Int> = [],
         onProgress: (@Sendable (String) -> Void)? = nil,
+        onPartialResult: (@Sendable (ProgressiveUpdate) async -> Void)? = nil
+    ) async throws -> [SubtitleLine] {
+        try await transcribeProgressively(
+            audioURL: audioURL,
+            sourceLanguage: sourceLanguage,
+            model: model,
+            preferredStartTime: preferredStartTime,
+            existingLines: existingLines,
+            completedChunkIndexes: completedChunkIndexes,
+            onProgress: onProgress,
+            onPartialResult: { update in
+                await onPartialResult?(update)
+                return nil
+            }
+        )
+    }
+
+    func transcribeProgressively(
+        audioURL: URL,
+        sourceLanguage: SubtitleSourceLanguage,
+        model: OfflineWhisperModel,
+        preferredStartTime: TimeInterval = 0,
+        existingLines: [SubtitleLine] = [],
+        completedChunkIndexes: Set<Int> = [],
+        onProgress: (@Sendable (String) -> Void)? = nil,
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> [SubtitleLine]?)? = nil
     ) async throws -> [SubtitleLine] {
+        // Actor methods may interleave at every await. Keep WhisperKit's mutable
+        // pipeline exclusive when a preview and a full task arrive together.
+        while activeTranscriptionCount > 0 {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
         setupMemoryWarningObserverIfNeeded()
         idleUnloadTask?.cancel()
         idleUnloadTask = nil
@@ -264,12 +295,12 @@ public actor LocalWhisperSubtitleService {
                     )
                 } catch let loadError {
                     UserDefaults.standard.removeObject(forKey: prewarmKey)
-                    // 若回退依然失败，说明本地模型文件损坏（如断点残留引发 CoreML: Error in reading the ML network）
-                    await OfflineWhisperModelManager.shared.handleCorruptedModel(model, at: modelFolder)
+                    // A CoreML load failure can also mean memory pressure or an unsupported
+                    // compute unit. Keep the installed files so the user can retry offline.
                     throw NSError(
                         domain: "LocalWhisperError",
                         code: -2,
-                        userInfo: [NSLocalizedDescriptionKey: "离线模型加载失败（文件损坏或不完整: \(loadError.localizedDescription)），已自动清理损坏缓存，请在设置中重新下载该模型"]
+                        userInfo: [NSLocalizedDescriptionKey: "离线模型加载失败：\(loadError.localizedDescription)。模型文件已保留，可重试或切换模型"]
                     )
                 }
             }
@@ -383,7 +414,8 @@ public actor LocalWhisperSubtitleService {
                 onProgress: onProgress
             )
 
-            if resolvedLanguageCode == nil, let detected = chunkResult.detectedLanguage, !detected.isEmpty {
+            if resolvedLanguageCode == nil, !chunkResult.lines.isEmpty,
+               let detected = chunkResult.detectedLanguage, !detected.isEmpty {
                 resolvedLanguageCode = detected
             }
 

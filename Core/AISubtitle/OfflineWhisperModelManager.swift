@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import WhisperKit
+import ZIPFoundation
 
 private final class ModelPreparationWaiter: @unchecked Sendable {
     private let lock = NSLock()
@@ -262,6 +263,91 @@ public final class OfflineWhisperModelManager: ObservableObject {
             errorMessage: nil
         )
         saveRecords()
+    }
+
+    /// Creates a portable ZIP of the installed model for AirDrop or Files.
+    /// The archive lives in Caches and can be removed after the share sheet closes.
+    public func exportArchive(for model: OfflineWhisperModel) async throws -> URL {
+        guard let folder = installedFolder(for: model) else {
+            throw modelTransferError("请先安装该离线模型")
+        }
+        let exports = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("WhisperModelExports", isDirectory: true)
+        let archiveURL = exports.appendingPathComponent("\(model.rawValue)-\(UUID().uuidString).zip")
+        return try await Task.detached(priority: .utility) {
+            try FileManager.default.createDirectory(at: exports, withIntermediateDirectories: true)
+            do {
+                try FileManager.default.zipItem(at: folder, to: archiveURL, compressionMethod: .none)
+                return archiveURL
+            } catch {
+                try? FileManager.default.removeItem(at: archiveURL)
+                throw error
+            }
+        }.value
+    }
+
+    /// Imports an exported ZIP without contacting the model host.
+    /// The existing model is kept until the incoming archive passes validation.
+    @discardableResult
+    public func importArchive(from sourceURL: URL) async throws -> OfflineWhisperModel {
+        guard sourceURL.pathExtension.lowercased() == "zip" else {
+            throw modelTransferError("请选择导出的 ZIP 模型文件")
+        }
+        let staging = Self.modelsDirectory.appendingPathComponent(".import-\(UUID().uuidString)", isDirectory: true)
+        let extracted = staging.appendingPathComponent("contents", isDirectory: true)
+        try await Task.detached(priority: .utility) {
+            let scoped = sourceURL.startAccessingSecurityScopedResource()
+            defer { if scoped { sourceURL.stopAccessingSecurityScopedResource() } }
+            try FileManager.default.createDirectory(at: extracted, withIntermediateDirectories: true)
+            do {
+                try FileManager.default.unzipItem(at: sourceURL, to: extracted)
+            } catch {
+                try? FileManager.default.removeItem(at: staging)
+                throw error
+            }
+        }.value
+        defer { try? FileManager.default.removeItem(at: staging) }
+
+        let children = try FileManager.default.contentsOfDirectory(
+            at: extracted, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        )
+        guard children.count == 1, let folder = children.first,
+              let model = OfflineWhisperModel.allCases.first(where: {
+                  Self.modelFolderName(folder.lastPathComponent, matches: $0)
+              }), isUsableModelFolder(folder, for: model) else {
+            throw modelTransferError("模型包缺少必要文件，或模型与当前版本不兼容")
+        }
+        guard !SubtitleTaskManager.shared.tasks.contains(where: { $0.phase.isActive && $0.model == model }) else {
+            throw modelTransferError("该模型正用于字幕任务，请在任务结束后导入")
+        }
+        guard record(for: model).state != .downloading else {
+            throw modelTransferError("该模型正在下载，请等待下载结束后再导入")
+        }
+        // Inspect the final location directly: the extracted staging folder must never
+        // be recorded as an installed model because it is removed on return.
+        if let installed = installedFolder(for: model),
+           !installed.path.hasPrefix(staging.path + "/") { return model }
+
+        let destination = Self.modelsDirectory.appendingPathComponent(folder.lastPathComponent, isDirectory: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: folder, to: destination)
+        let size = directorySize(destination)
+        update(model) { record in
+            record.state = .installed
+            record.progress = 1
+            record.completedBytes = size
+            record.totalBytes = size
+            record.folderPath = destination.path
+            record.errorMessage = nil
+        }
+        return model
+    }
+
+    private func modelTransferError(_ message: String) -> NSError {
+        NSError(domain: "OfflineModelTransfer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     public func refreshInstalledState() {
