@@ -339,7 +339,7 @@ public struct AISubtitleSettingsSheet: View {
                         } else if !viewModel.subtitles.isEmpty {
                             Image(systemName: "checkmark.seal.fill")
                                 .foregroundColor(.green)
-                            Text("✅ 离线字幕已就绪 (共 \(viewModel.subtitles.count) 句) · 点击重新生成")
+                            Text("✅ 字幕已就绪 (共 \(viewModel.subtitles.count) 句)")
                                 .font(.system(size: 14, weight: .semibold))
                         } else {
                             Image(systemName: "sparkles")

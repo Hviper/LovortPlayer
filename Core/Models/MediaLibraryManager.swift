@@ -16,15 +16,18 @@ public final class MediaLibraryManager: ObservableObject {
     @Published public var importStatusText: String = ""
     @Published public var importSuccessMessage: String? = nil
     @Published public var isSuccessMessageError: Bool = false
+    @Published public var notificationVideoURL: URL? = nil
 
-    public func showNotification(message: String, isError: Bool = false) {
+    public func showNotification(message: String, isError: Bool = false, videoURL: URL? = nil) {
         importSuccessMessage = message
         isSuccessMessageError = isError
+        notificationVideoURL = videoURL
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_500_000_000)
             if self.importSuccessMessage == message {
                 self.importSuccessMessage = nil
                 self.isSuccessMessageError = false
+                self.notificationVideoURL = nil
             }
         }
     }

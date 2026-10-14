@@ -56,14 +56,19 @@ public final class PlayerViewModel: ObservableObject {
     @Published public private(set) var currentVideoURL: URL?
     private var timeObserverToken: Any?
     private var controlsHideTimer: Task<Void, Never>?
-    private var subtitleGenerationTask: Task<Void, Never>?
+    private var subtitleTaskObservation: AnyCancellable?
 
-    public init() {}
+    public init() {
+        subtitleTaskObservation = SubtitleTaskManager.shared.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.syncGlobalSubtitleTask()
+            }
+        }
+    }
 
     public func loadVideo(url: URL) {
         cleanupPlaybackEngines(saveProgress: false)
-        subtitleGenerationTask?.cancel()
-        subtitleGenerationTask = nil
         isGeneratingSubtitles = false
         generatingSubtitleStatusText = ""
         subtitleErrorMessage = nil
@@ -85,6 +90,7 @@ public final class PlayerViewModel: ObservableObject {
             self.subtitles = srt
             self.isAISubtitleEnabled = true
         }
+        syncGlobalSubtitleTask()
 
         // 读取历史播放进度
         let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
@@ -359,52 +365,33 @@ public final class PlayerViewModel: ObservableObject {
         enhanceWithGPT: Bool = false
     ) {
         guard let url = currentVideoURL else { return }
-        subtitleGenerationTask?.cancel()
-        subtitleGenerationTask = Task { [weak self] in
-            guard let self else { return }
-            self.isGeneratingSubtitles = true
-            self.generatingSubtitleStatusText = "正在准备提取音轨..."
-            self.subtitleErrorMessage = nil
-            do {
-                let lines = try await AISubtitleCoordinator.shared.processVideo(
-                    videoURL: url,
-                    targetLanguage: targetLanguage,
-                    sourceLanguage: sourceLanguage,
-                    engine: engine,
-                    model: offlineModel,
-                    translationProvider: translationProvider,
-                    enhanceWithGPT: enhanceWithGPT,
-                    preferredStartTime: self.currentTime,
-                    forceRegenerate: false,
-                    onProgress: { [weak self] status in
-                        Task { @MainActor in
-                            guard let self, self.currentVideoURL == url else { return }
-                            self.generatingSubtitleStatusText = status
-                        }
-                    },
-                    onPartialResult: { [weak self] partialLines in
-                        await MainActor.run {
-                            guard let self, self.currentVideoURL == url else { return }
-                            self.subtitles = partialLines
-                            self.isAISubtitleEnabled = true
-                            self.updateActiveSubtitle(at: self.currentTime)
-                        }
-                    }
-                )
-                try Task.checkCancellation()
-                guard self.currentVideoURL == url else { return }
-                self.subtitles = lines
-                self.isAISubtitleEnabled = true
-                self.updateActiveSubtitle(at: self.currentTime)
-            } catch {
-                guard !Task.isCancelled, self.currentVideoURL == url else { return }
-                print("Generate subtitles failed: \(error)")
-                self.subtitleErrorMessage = error.localizedDescription
-            }
-            if self.currentVideoURL == url {
-                self.isGeneratingSubtitles = false
-                self.subtitleGenerationTask = nil
-            }
+        _ = SubtitleTaskManager.shared.enqueue(
+            videoURL: url,
+            videoTitle: url.lastPathComponent,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            engine: engine,
+            model: offlineModel,
+            translationProvider: translationProvider,
+            enhanceWithGPT: enhanceWithGPT,
+            preferredStartTime: currentTime
+        )
+        syncGlobalSubtitleTask()
+    }
+
+    private func syncGlobalSubtitleTask() {
+        guard let url = currentVideoURL else { return }
+        if let task = SubtitleTaskManager.shared.task(for: url) {
+            isGeneratingSubtitles = task.phase.isActive
+            generatingSubtitleStatusText = task.statusText
+            subtitleErrorMessage = task.errorMessage
+        } else {
+            isGeneratingSubtitles = false
+        }
+        if let lines = SubtitleTaskManager.shared.subtitles(for: url), !lines.isEmpty {
+            subtitles = lines
+            isAISubtitleEnabled = true
+            updateActiveSubtitle(at: currentTime)
         }
     }
 

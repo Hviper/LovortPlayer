@@ -177,6 +177,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false,
         onProgress: (@Sendable (String) -> Void)? = nil,
+        onTranscriptionProgress: (@Sendable (_ completedChunks: Int, _ totalChunks: Int) async -> Void)? = nil,
         onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil
     ) async throws -> [SubtitleLine] {
         let selectedEngine = engine ?? currentEngine
@@ -263,6 +264,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             lines: update.lines
                         )
                         _ = try? cacheStore.save(partialDocument, for: videoURL)
+                        await onTranscriptionProgress?(update.completedChunkIndexes.count, update.totalChunkCount)
                         await onPartialResult?(update.lines)
                     }
                 )
@@ -319,7 +321,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             lines: originalLines
         )
         _ = try cacheStore.save(originalDocument, for: videoURL)
-        saveSRTBestEffort(lines: originalLines, videoURL: videoURL)
+        saveSRTBestEffort(lines: originalLines, videoURL: videoURL, suffix: "source")
 
         var finalLines = originalLines
         var translationWarning: String?
@@ -383,7 +385,19 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             lines: finalLines
         )
         _ = try cacheStore.save(document, for: videoURL)
-        saveSRTBestEffort(lines: finalLines, videoURL: videoURL)
+        saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: "bilingual")
+        saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: nil)
+        if translationComplete {
+            let translatedOnly = finalLines.map { line in
+                SubtitleLine(
+                    id: line.id,
+                    startTime: line.startTime,
+                    endTime: line.endTime,
+                    originalText: line.translatedText ?? line.originalText
+                )
+            }
+            saveSRTBestEffort(lines: translatedOnly, videoURL: videoURL, suffix: "zh-Hans")
+        }
 
         if let translationWarning {
             onProgress?("⚠️ \(translationWarning)")
@@ -393,15 +407,16 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         return finalLines
     }
 
-    private func saveSRTBestEffort(lines: [SubtitleLine], videoURL: URL) {
+    private func saveSRTBestEffort(lines: [SubtitleLine], videoURL: URL, suffix: String?) {
         let content = SRTParser.generateSRT(from: lines)
-        let sidecarURL = videoURL.deletingPathExtension().appendingPathExtension("srt")
+        let base = videoURL.deletingPathExtension()
+        let sidecarURL = suffix.map { base.appendingPathExtension("\($0).srt") }
+            ?? base.appendingPathExtension("srt")
         if (try? content.write(to: sidecarURL, atomically: true, encoding: .utf8)) != nil { return }
 
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let fallbackURL = documents
-            .appendingPathComponent(videoURL.deletingPathExtension().lastPathComponent)
-            .appendingPathExtension("srt")
+        let fileName = suffix.map { "\(base.lastPathComponent).\($0).srt" } ?? "\(base.lastPathComponent).srt"
+        let fallbackURL = documents.appendingPathComponent(fileName)
         try? content.write(to: fallbackURL, atomically: true, encoding: .utf8)
     }
 }

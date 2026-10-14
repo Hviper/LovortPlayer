@@ -31,6 +31,10 @@ public struct SettingsView: View {
                             defaultVolumeRow
                         }
 
+                        settingsSection(title: "字幕与离线模型", icon: "captions.bubble") {
+                            subtitleModelSettingsRow
+                        }
+
                         // 私密文件夹
                         settingsSection(title: "私密文件夹", icon: "lock.shield") {
                             vaultShowToggle
@@ -286,6 +290,34 @@ public struct SettingsView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: settings.useDefaultVolume)
+    }
+
+    private var subtitleModelSettingsRow: some View {
+        NavigationLink {
+            OfflineSubtitleSettingsView()
+        } label: {
+            HStack {
+                Image(systemName: "waveform.and.mic")
+                    .foregroundColor(settings.themeColor.color)
+                    .font(.system(size: 14))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("离线字幕与模型")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                    Text("提前下载 WhisperKit、选择默认模型和完成提醒")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - 私密保险箱 Tab 开关

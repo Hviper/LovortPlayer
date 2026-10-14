@@ -2,6 +2,46 @@ import XCTest
 @testable import LovortPlayerCore
 
 final class SubtitlePipelineTests: XCTestCase {
+    func testSubtitleTaskPhaseActivityClassification() {
+        XCTAssertTrue(SubtitleTaskPhase.queued.isActive)
+        XCTAssertTrue(SubtitleTaskPhase.transcribing.isActive)
+        XCTAssertTrue(SubtitleTaskPhase.translating.isActive)
+        XCTAssertFalse(SubtitleTaskPhase.completed.isActive)
+        XCTAssertFalse(SubtitleTaskPhase.pausedByUser.isActive)
+        XCTAssertFalse(SubtitleTaskPhase.failed.isActive)
+    }
+
+    func testSubtitleTaskProgressWeightsTranscriptionAndTranslation() {
+        let now = Date()
+        let item = SubtitleTaskItem(
+            id: UUID(),
+            videoURL: URL(fileURLWithPath: "/tmp/movie.mp4"),
+            videoTitle: "movie.mp4",
+            phase: .translating,
+            statusText: "翻译中",
+            transcriptionProgress: 1,
+            translationProgress: 0.5,
+            completedChunks: 10,
+            totalChunks: 10,
+            translatedBatches: 2,
+            totalTranslationBatches: 4,
+            lineCount: 100,
+            sourceLanguage: .japanese,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .apple,
+            enhanceWithGPT: false,
+            preferredStartTime: 0,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: nil,
+            errorMessage: nil
+        )
+        XCTAssertEqual(item.overallProgress, 0.86, accuracy: 0.0001)
+        XCTAssertEqual(OfflineWhisperModel.highAccuracy.estimatedSizeBytes, 626 * 1_024 * 1_024)
+    }
+
     func testLanguageMapping() {
         XCTAssertEqual(SubtitleSourceLanguage.japanese.whisperCode, "ja")
         XCTAssertEqual(SubtitleSourceLanguage.english.whisperCode, "en")

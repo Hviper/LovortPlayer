@@ -93,6 +93,25 @@ public struct FullscreenVideoPlayerView: View {
             // AI 实时双语字幕图层 (确保置于控制层下方，不受控制栏显隐影响)
             AISubtitleOverlayView(subtitle: viewModel.currentSubtitle)
 
+            if viewModel.isGeneratingSubtitles {
+                VStack {
+                    HStack(spacing: 8) {
+                        ProgressView().tint(.cyan).scaleEffect(0.8)
+                        Text(viewModel.generatingSubtitleStatusText.isEmpty ? "字幕任务处理中" : viewModel.generatingSubtitleStatusText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
+                    .clipShape(Capsule())
+                    .padding(.top, 58)
+                    Spacer()
+                }
+            }
+
             if let message = viewModel.playbackErrorMessage {
                 VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")

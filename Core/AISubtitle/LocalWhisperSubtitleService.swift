@@ -24,6 +24,14 @@ public enum OfflineWhisperModel: String, CaseIterable, Codable, Identifiable, Se
         case .compact: return "旧设备更稳，速度快，但生词和多人对白准确率较低"
         }
     }
+
+    public var estimatedSizeBytes: Int64 {
+        switch self {
+        case .highAccuracy: return 626 * 1_024 * 1_024
+        case .balanced: return 240 * 1_024 * 1_024
+        case .compact: return 74 * 1_024 * 1_024
+        }
+    }
 }
 
 public enum SubtitleSourceLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
@@ -91,14 +99,16 @@ public actor LocalWhisperSubtitleService {
     ) async throws -> [SubtitleLine] {
         if pipeline == nil || loadedModel != model {
             onProgress?("正在准备离线模型（首次使用需联网下载 \(model.displayName)）...")
+            let modelFolder = try await OfflineWhisperModelManager.shared.prepare(model)
             pipeline = try await WhisperKit(
                 WhisperKitConfig(
                     model: model.rawValue,
+                    modelFolder: modelFolder.path,
                     verbose: false,
                     prewarm: true,
                     load: true,
-                    download: true,
-                    useBackgroundDownloadSession: true
+                    download: false,
+                    useBackgroundDownloadSession: false
                 )
             )
             loadedModel = model

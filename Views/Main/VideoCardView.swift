@@ -8,6 +8,11 @@ public struct VideoCardView: View {
     public var onDelete: (() -> Void)? = nil
 
     @State private var thumbnail: Image? = nil
+    @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
+
+    private var subtitleTask: SubtitleTaskItem? {
+        subtitleTasks.task(for: video.fileURL)
+    }
 
     public init(
         video: VideoItem,
@@ -86,6 +91,17 @@ public struct VideoCardView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 2))
                         }
                     }
+
+                    if let task = subtitleTask {
+                        VStack {
+                            HStack {
+                                subtitleBadge(task)
+                                Spacer()
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                    }
                 }
 
                 // 标题与信息元数据（带快捷操作菜单）
@@ -109,7 +125,7 @@ public struct VideoCardView: View {
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundColor(.cyan.opacity(0.9))
                             } else {
-                                Text(video.isHidden ? "私密文件" : "AI 字幕就绪")
+                                Text(video.isHidden ? "私密文件" : subtitleSummary)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundColor(video.isHidden ? .yellow.opacity(0.9) : .white.opacity(0.4))
                             }
@@ -120,6 +136,10 @@ public struct VideoCardView: View {
 
                     // 快捷操作菜单 ("...")
                     Menu {
+                        subtitleMenu
+
+                        Divider()
+
                         Button {
                             VideoExportManager.shared.shareVideo(url: video.fileURL)
                         } label: {
@@ -172,6 +192,10 @@ public struct VideoCardView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            subtitleMenu
+
+            Divider()
+
             Button {
                 VideoExportManager.shared.shareVideo(url: video.fileURL)
             } label: {
@@ -206,6 +230,61 @@ public struct VideoCardView: View {
         .task {
             await generateThumbnail()
         }
+    }
+
+    @ViewBuilder
+    private var subtitleMenu: some View {
+        if let task = subtitleTask, task.phase.isActive {
+            Button { subtitleTasks.pause(task.id) } label: {
+                Label("暂停字幕任务", systemImage: "pause.circle")
+            }
+            Button { } label: {
+                Label(task.statusText, systemImage: "waveform")
+            }
+            .disabled(true)
+        } else if let task = subtitleTask,
+                  [.pausedByUser, .pausedBySystem, .failed, .sourceReady, .cancelled].contains(task.phase) {
+            Button { subtitleTasks.resume(task.id) } label: {
+                Label(task.phase == .failed || task.phase == .sourceReady ? "重试字幕任务" : "继续字幕任务", systemImage: "play.circle")
+            }
+        } else if subtitleTask?.phase == .completed {
+            Button { } label: {
+                Label("双语字幕已就绪", systemImage: "checkmark.seal.fill")
+            }
+            .disabled(true)
+        } else {
+            Button { enqueueDefaultSubtitleTask() } label: {
+                Label("生成双语字幕", systemImage: "sparkles")
+            }
+        }
+    }
+
+    private var subtitleSummary: String {
+        guard let task = subtitleTask else { return "暂无字幕" }
+        switch task.phase {
+        case .completed: return "双语字幕已就绪"
+        case .sourceReady: return "原文字幕已就绪"
+        case .transcribing: return "字幕转写 \(Int(task.transcriptionProgress * 100))%"
+        case .translating: return "字幕翻译 \(Int(task.translationProgress * 100))%"
+        default: return task.phase.displayName
+        }
+    }
+
+    private func enqueueDefaultSubtitleTask() {
+        subtitleTasks.enqueue(videoURL: video.fileURL, videoTitle: video.title)
+    }
+
+    private func subtitleBadge(_ task: SubtitleTaskItem) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: task.phase == .completed ? "captions.bubble.fill" : "waveform")
+            Text(task.phase == .completed ? "双语" : task.phase.displayName)
+                .lineLimit(1)
+        }
+        .font(.system(size: 10, weight: .bold))
+        .foregroundColor(task.phase == .completed ? .black : .white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(task.phase == .completed ? Color.cyan : Color.black.opacity(0.72)))
     }
 
     private func saveToPhotoLibrary() {

@@ -19,7 +19,9 @@ public struct MediaLibraryHomeView: View {
     @State private var pinInput: String = ""
     @State private var isDecoySpace: Bool = false
     @State private var showSettings: Bool = false
+    @State private var showSubtitleTasks: Bool = false
     @ObservedObject private var appleTranslation = AppleTranslationBridge.shared
+    @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
 
     #if os(iOS)
     @State private var isPhotosPickerPresented: Bool = false
@@ -67,6 +69,16 @@ public struct MediaLibraryHomeView: View {
                                 .foregroundColor(.white)
                                 .lineLimit(2)
                             Spacer()
+                            if let videoURL = libraryManager.notificationVideoURL,
+                               let video = libraryManager.videos.first(where: { $0.fileURL.standardizedFileURL == videoURL.standardizedFileURL }) {
+                                Button("立即播放") {
+                                    selectedVideo = video
+                                    libraryManager.importSuccessMessage = nil
+                                    libraryManager.notificationVideoURL = nil
+                                }
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(settings.themeColor.color)
+                            }
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -161,6 +173,15 @@ public struct MediaLibraryHomeView: View {
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
                 }
             }
+            .overlay(alignment: .bottom) {
+                if let task = subtitleTasks.activeTask {
+                    FloatingSubtitleTaskCapsule(task: task) {
+                        showSubtitleTasks = true
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                }
+            }
             #if os(iOS)
             .navigationBarHidden(true)
             .photosPicker(
@@ -199,6 +220,9 @@ public struct MediaLibraryHomeView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showSubtitleTasks) {
+                SubtitleTaskCenterView()
             }
             .fileImporter(
                 isPresented: $isFileImporterPresented,
@@ -306,6 +330,24 @@ public struct MediaLibraryHomeView: View {
                     Capsule()
                         .fill(Color.white.opacity(0.1))
                 )
+            }
+
+            // 设置按钮
+            Button(action: { showSubtitleTasks = true }) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "captions.bubble")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.white.opacity(0.1)))
+                    if subtitleTasks.activeTaskCount > 0 {
+                        Text("\(subtitleTasks.activeTaskCount)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.black)
+                            .frame(minWidth: 16, minHeight: 16)
+                            .background(Circle().fill(settings.themeColor.color))
+                    }
+                }
             }
 
             // 设置按钮
