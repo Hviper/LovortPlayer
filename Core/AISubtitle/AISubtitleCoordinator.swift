@@ -465,39 +465,58 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             throw NSError(domain: "SubtitlePreview", code: -4,
                           userInfo: [NSLocalizedDescriptionKey: "无法读取视频时长"])
         }
-        let begin = min(max(0, startTime), max(0, duration - 30))
-        let length = min(30, duration - begin)
+        let halfWindow: TimeInterval = 15
+        let primaryBegin = min(max(0, startTime - halfWindow), max(0, duration - 30))
+        var candidateBegins: [TimeInterval] = [primaryBegin]
+        if primaryBegin > 0 {
+            candidateBegins.append(0)
+        }
+
         let orderedTracks = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage)
         var sourceLines: [SubtitleLine]?
         var matchedTrackDescription: String?
-        for (attempt, track) in orderedTracks.enumerated() {
-            try Task.checkCancellation()
-            let originalIndex = tracks.firstIndex(where: { $0 === track }) ?? attempt
-            let description = AudioTrackSelection.displayName(for: track, at: originalIndex)
-            onProgress?("正在提取 30 秒预览音频（\(description)，第 \(attempt + 1)/\(orderedTracks.count) 条）…")
-            let clipURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lovort-preview-\(UUID().uuidString).m4a")
-            defer { try? FileManager.default.removeItem(at: clipURL) }
-            do {
-                try await exportPreviewAudio(
-                    track: track, start: begin, duration: length, outputURL: clipURL
-                )
-                onProgress?("正在设备端识别（宽松人声检测）…")
-                let lines = try await localService.transcribe(
-                    audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
-                    useRelaxedVoiceDetection: LocalWhisperSubtitleService.previewUsesRelaxedVoiceDetection,
-                    onProgress: onProgress
-                ).map { line in
-                    SubtitleLine(id: line.id, startTime: line.startTime + begin,
-                                 endTime: line.endTime + begin, originalText: line.originalText)
+        var resolvedBegin: TimeInterval = primaryBegin
+        var resolvedLength: TimeInterval = min(30, duration - primaryBegin)
+
+        windowLoop: for candidateBegin in candidateBegins {
+            let length = min(30, duration - candidateBegin)
+            for (attempt, track) in orderedTracks.enumerated() {
+                try Task.checkCancellation()
+                let originalIndex = tracks.firstIndex(where: { $0 === track }) ?? attempt
+                let description = AudioTrackSelection.displayName(for: track, at: originalIndex)
+                if candidateBegin != primaryBegin {
+                    onProgress?("首选区间未检测到台词，正在尝试片头 30 秒（\(description)）…")
+                } else {
+                    onProgress?("正在提取 30 秒预览音频（\(description)，第 \(attempt + 1)/\(orderedTracks.count) 条）…")
                 }
-                sourceLines = lines
-                matchedTrackDescription = description
-                break
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                guard isNoSpeechError(error) else { throw error }
+                let clipURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("lovort-preview-\(UUID().uuidString).m4a")
+                defer { try? FileManager.default.removeItem(at: clipURL) }
+                do {
+                    try await exportPreviewAudio(
+                        track: track, start: candidateBegin, duration: length, outputURL: clipURL
+                    )
+                    onProgress?("正在设备端识别（宽松人声检测）…")
+                    let lines = try await localService.transcribe(
+                        audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
+                        useRelaxedVoiceDetection: LocalWhisperSubtitleService.previewUsesRelaxedVoiceDetection,
+                        onProgress: onProgress
+                    ).map { line in
+                        SubtitleLine(id: line.id, startTime: line.startTime + candidateBegin,
+                                     endTime: line.endTime + candidateBegin, originalText: line.originalText)
+                    }
+                    if !lines.isEmpty {
+                        sourceLines = lines
+                        matchedTrackDescription = description
+                        resolvedBegin = candidateBegin
+                        resolvedLength = length
+                        break windowLoop
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard isNoSpeechError(error) else { throw error }
+                }
             }
         }
         guard let sourceLines, let matchedTrackDescription else {
@@ -523,7 +542,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             warning = "翻译预览未完成：\(error.localizedDescription)"
         }
         try Task.checkCancellation()
-        return SubtitlePreviewResult(startTime: begin, endTime: begin + length,
+        return SubtitlePreviewResult(startTime: resolvedBegin, endTime: resolvedBegin + resolvedLength,
                                      elapsedTime: Date().timeIntervalSince(startedAt),
                                      audioTrackDescription: matchedTrackDescription,
                                      lines: resultLines, translationWarning: warning)
@@ -535,6 +554,19 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         duration: TimeInterval,
         outputURL: URL
     ) async throws {
+        let trackRange = try await track.load(.timeRange)
+        let trackStartSeconds = CMTimeGetSeconds(trackRange.start)
+        let safeTrackStart = trackStartSeconds.isFinite ? max(0, trackStartSeconds) : 0
+        let sliceStartCM = CMTime(seconds: safeTrackStart + start, preferredTimescale: 600)
+        let requestedDurationCM = CMTime(seconds: duration, preferredTimescale: 600)
+        let trackEndCM = CMTimeAdd(trackRange.start, trackRange.duration)
+        let availableDurationCM = CMTimeSubtract(trackEndCM, sliceStartCM)
+        let finalDurationCM = CMTimeMinimum(requestedDurationCM, availableDurationCM)
+        guard finalDurationCM > .zero else {
+            throw NSError(domain: "SubtitlePreview", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey: "预览音频范围超出有效音轨"])
+        }
+        let sliceTimeRange = CMTimeRange(start: sliceStartCM, duration: finalDurationCM)
         let composition = AVMutableComposition()
         guard let compositionTrack = composition.addMutableTrack(
             withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
@@ -542,18 +574,14 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             throw NSError(domain: "SubtitlePreview", code: -5,
                           userInfo: [NSLocalizedDescriptionKey: "无法创建预览音轨"])
         }
-        let trackRange = try await track.load(.timeRange)
-        try compositionTrack.insertTimeRange(trackRange, of: track, at: .zero)
+        try compositionTrack.insertTimeRange(sliceTimeRange, of: track, at: .zero)
         guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
             throw NSError(domain: "SubtitlePreview", code: -6,
                           userInfo: [NSLocalizedDescriptionKey: "无法导出预览音频"])
         }
+        try? FileManager.default.removeItem(at: outputURL)
         exporter.outputURL = outputURL
         exporter.outputFileType = .m4a
-        exporter.timeRange = CMTimeRange(
-            start: CMTime(seconds: start, preferredTimescale: 600),
-            duration: CMTime(seconds: duration, preferredTimescale: 600)
-        )
         await exporter.export()
         guard exporter.status == .completed else {
             throw exporter.error ?? NSError(domain: "SubtitlePreview", code: -7,

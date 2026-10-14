@@ -184,11 +184,16 @@ public actor LocalWhisperSubtitleService {
     ) -> Task<URL, Error> {
         Task {
             try Task.checkCancellation()
-            let composition = try await self.makeAudioComposition(from: mediaURL, sourceLanguage: sourceLanguage)
             let sliceURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("lovort-local-\(UUID().uuidString).m4a")
             do {
-                try await self.exportAudioSlice(asset: composition, start: start, duration: duration, outputURL: sliceURL)
+                try await self.exportAudioSlice(
+                    mediaURL: mediaURL,
+                    sourceLanguage: sourceLanguage,
+                    start: start,
+                    duration: duration,
+                    outputURL: sliceURL
+                )
                 return sliceURL
             } catch {
                 try? FileManager.default.removeItem(at: sliceURL)
@@ -324,9 +329,12 @@ public actor LocalWhisperSubtitleService {
         }
 
         try Task.checkCancellation()
-        let asset = try await makeAudioComposition(from: audioURL, sourceLanguage: sourceLanguage)
-        let durationValue = try await asset.load(.duration)
-        let duration = CMTimeGetSeconds(durationValue)
+        let sourceAsset = AVURLAsset(url: audioURL)
+        let tracks = try await sourceAsset.loadTracks(withMediaType: .audio)
+        guard !tracks.isEmpty else { throw serviceError("视频中没有可用音轨") }
+        let selectedTrack = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage)[0]
+        let trackRange = try await selectedTrack.load(.timeRange)
+        let duration = CMTimeGetSeconds(trackRange.duration)
         guard duration.isFinite, duration > 0 else { throw serviceError("无法读取音频时长") }
 
         let totalChunks = max(1, Int(ceil(duration / Self.chunkDuration)))
@@ -471,7 +479,7 @@ public actor LocalWhisperSubtitleService {
             chunkingStrategy: useRelaxedVoiceDetection ? ChunkingStrategy.none : .vad
         )
         let throttle = ProgressThrottleBox()
-        let inputOptions = AudioInputOptions(channelMode: .sumChannels(nil), audioLoadingMode: .incremental)
+        let inputOptions = AudioInputOptions(channelMode: .sumChannels(nil), audioLoadingMode: .fullFile)
         let results = await pipeline.transcribeWithResults(
             audioPaths: [audioURL.path],
             audioInputOptions: inputOptions,
@@ -510,38 +518,42 @@ public actor LocalWhisperSubtitleService {
         return (lines: lines, detectedLanguage: detectedLanguage)
     }
 
-    private func makeAudioComposition(
-        from mediaURL: URL,
-        sourceLanguage: SubtitleSourceLanguage
-    ) async throws -> AVMutableComposition {
+    private func exportAudioSlice(
+        mediaURL: URL,
+        sourceLanguage: SubtitleSourceLanguage,
+        start: TimeInterval,
+        duration: TimeInterval,
+        outputURL: URL
+    ) async throws {
         let sourceAsset = AVURLAsset(url: mediaURL)
         let tracks = try await sourceAsset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else { throw serviceError("视频中没有可用音轨") }
-        let selectedTrack = AudioTrackSelection.orderedTracks(
-            tracks,
-            sourceLanguage: sourceLanguage
-        )[0]
-        let timeRange = try await selectedTrack.load(.timeRange)
+        let selectedTrack = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage)[0]
+
+        let trackRange = try await selectedTrack.load(.timeRange)
+        let trackStartSeconds = CMTimeGetSeconds(trackRange.start)
+        let safeTrackStart = trackStartSeconds.isFinite ? max(0, trackStartSeconds) : 0
+        let sliceStartCM = CMTime(seconds: safeTrackStart + start, preferredTimescale: 600)
+        let requestedDurationCM = CMTime(seconds: duration, preferredTimescale: 600)
+        let trackEndCM = CMTimeAdd(trackRange.start, trackRange.duration)
+        let availableDurationCM = CMTimeSubtract(trackEndCM, sliceStartCM)
+        let finalDurationCM = CMTimeMinimum(requestedDurationCM, availableDurationCM)
+        guard finalDurationCM > .zero else { throw serviceError("音频分片范围超出有效音轨") }
+
+        let sliceTimeRange = CMTimeRange(start: sliceStartCM, duration: finalDurationCM)
         let composition = AVMutableComposition()
         guard let compositionTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid
         ) else { throw serviceError("无法创建离线音频轨道") }
-        try compositionTrack.insertTimeRange(timeRange, of: selectedTrack, at: .zero)
-        return composition
-    }
+        try compositionTrack.insertTimeRange(sliceTimeRange, of: selectedTrack, at: .zero)
 
-    private func exportAudioSlice(asset: AVAsset, start: TimeInterval, duration: TimeInterval, outputURL: URL) async throws {
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
             throw serviceError("无法创建离线音频分片")
         }
         try? FileManager.default.removeItem(at: outputURL)
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .m4a
-        exportSession.timeRange = CMTimeRange(
-            start: CMTime(seconds: start, preferredTimescale: 600),
-            duration: CMTime(seconds: duration, preferredTimescale: 600)
-        )
         await exportSession.export()
         guard exportSession.status == .completed else {
             throw exportSession.error ?? serviceError("离线音频分片导出失败")
@@ -566,7 +578,7 @@ public actor LocalWhisperSubtitleService {
 
     private func clean(_ text: String) -> String {
         text
-            .replacingOccurrences(of: "<|[^>]+|>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"<\|[^>|]+\|>"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
