@@ -69,11 +69,13 @@ public struct AISubtitleSettingsSheet: View {
     @ObservedObject private var modelManager = AIModelManager.shared
     @Environment(\.dismiss) private var dismiss
 
+    @ObservedObject private var display = SubtitleDisplayPreferences.shared
+    @AppStorage("subtitle.workers") private var workerCount = 4
     @State private var apiKey: String = ""
     @State private var proxyHost: String = ""
     @State private var proxyPort: String = ""
-    @State private var selectedSourceLanguage: SubtitleSourceLanguage = .japanese
-    @State private var selectedTargetLanguage: String = "中文 (简体)"
+    @State private var selectedSourceLanguage: SubtitleSourceLanguage = .automatic
+    @AppStorage("subtitle.targetLanguage") private var selectedTargetLanguage: String = "中文 (简体)"
     @State private var selectedEngine: AISubtitleEngineType = AISubtitleCoordinator.shared.currentEngine
     @State private var selectedOfflineModel: OfflineWhisperModel = AISubtitleCoordinator.shared.offlineModel
     @State private var selectedTranslationProvider: SubtitleTranslationProviderType = AISubtitleCoordinator.shared.translationProvider
@@ -96,17 +98,19 @@ public struct AISubtitleSettingsSheet: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        translationProviderSection
-                        if selectedTranslationProvider == .openAI {
-                            modelSelectionSection
-                        } else if enhanceWithGPT {
-                            modelSelectionSection
-                        }
                         offlineGenerationSection
                         displayToggleSection
-                        proxySettingsSection
-                        if selectedTranslationProvider == .openAI || selectedEngine == .cloudOpenAI || enhanceWithGPT {
-                            manualApiKeySection
+                        subtitleDisplaySettings
+                        DisclosureGroup("翻译服务与高级选项") {
+                            translationProviderSection
+                            if selectedTranslationProvider == .openAI || enhanceWithGPT { modelSelectionSection }
+                            Picker("识别并行数", selection: $workerCount) {
+                                Text("1（省内存）").tag(1); Text("2").tag(2); Text("4").tag(4)
+                            }
+                            Text("设备明显发热时会自动降为 1；实际速度可在设置的性能记录中查看。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                            proxySettingsSection
+                            if selectedTranslationProvider == .openAI || selectedEngine == .cloudOpenAI || enhanceWithGPT { manualApiKeySection }
                         }
                     }
                     .padding(.horizontal, 20)
@@ -138,6 +142,9 @@ public struct AISubtitleSettingsSheet: View {
                 Text("输入 OpenAI Platform 项目可用的模型 ID，设定后用于影视字幕翻译或语境精修。")
             }
             .onAppear {
+                if let url = viewModel.currentVideoURL {
+                    selectedSourceLanguage = SubtitleSourceLanguage(rawValue: UserDefaults.standard.string(forKey: "subtitle.language.\(MediaIdentityStore.shared.id(for: url))") ?? "") ?? .automatic
+                }
                 self.selectedTranslationProvider = AISubtitleCoordinator.shared.translationProvider
                 self.apiKey = AISubtitleCoordinator.shared.getSavedOpenAIKey()
                 self.proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
@@ -152,6 +159,10 @@ public struct AISubtitleSettingsSheet: View {
                 self.translationAPIKey = TranslationCredentialStore.shared.value(for: selectedTranslationProvider)
                 self.azureRegion = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
             }
+            .onChange(of: selectedSourceLanguage) { _, language in
+                if let url = viewModel.currentVideoURL { UserDefaults.standard.set(language.rawValue, forKey: "subtitle.language.\(MediaIdentityStore.shared.id(for: url))") }
+            }
+            .onChange(of: selectedOfflineModel) { _, model in AISubtitleCoordinator.shared.offlineModel = model }
             .onDisappear { preview.cancel() }
         }
     }
@@ -275,7 +286,7 @@ public struct AISubtitleSettingsSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频。每个分片识别完成后即可显示原文，全部识别完后再翻译。模型首次使用需联网下载，之后可离线转写。")
+            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频。首段原文出来后立即翻译，后续识别继续进行；每批成功译文自动保存。模型首次使用需联网下载，之后可离线转写。")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -605,6 +616,23 @@ public struct AISubtitleSettingsSheet: View {
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.06)))
     }
 
+    private var subtitleDisplaySettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("显示内容", selection: $display.textMode) { ForEach(SubtitleExportTextMode.allCases) { Text($0.title).tag($0) } }
+            Text("字幕字号：\(Int(display.scale * 100))%")
+            Slider(value: $display.scale, in: 0.7...1.6, step: 0.05)
+            Text("字幕上下位置")
+            Slider(value: $display.verticalOffset, in: -0.08...0.12, step: 0.01)
+            if let url = viewModel.currentVideoURL {
+                Stepper(value: Binding(get: { display.offset(for: url) }, set: { display.setOffset($0, for: url) }), in: -30...30, step: 0.25) {
+                    Text("字幕时间偏移：\(String(format: "%.2f", display.offset(for: url))) 秒")
+                }
+                Text("正值会提前显示字幕，只影响当前视频的播放。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }.padding(16).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+    }
+
     // MARK: - 3. 画面字幕浮层跟随显示
     private var displayToggleSection: some View {
         HStack {
@@ -617,7 +645,7 @@ public struct AISubtitleSettingsSheet: View {
                     .foregroundColor(.white.opacity(0.5))
             }
             Spacer()
-            Toggle("", isOn: $viewModel.isAISubtitleEnabled)
+            Toggle("", isOn: Binding(get: { viewModel.isAISubtitleEnabled }, set: { viewModel.setSubtitleDisplayEnabled($0) }))
                 .labelsHidden()
                 .tint(AppSettings.shared.themeColor.color)
         }

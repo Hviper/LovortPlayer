@@ -1,9 +1,15 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 import AVFoundation
 
 @main
 struct LovortPlayerApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     init() {
+        PhotoImportStaging.removeAbandoned()
+        PlayerViewModel.removeAbandonedPrivateClips()
         #if os(iOS)
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -20,6 +26,11 @@ struct LovortPlayerApp: App {
             MediaLibraryHomeView()
                 .preferredColorScheme(.dark)
                 .task { SubtitleVideoExporter.shared.cleanupExpired() }
+                .onChange(of: scenePhase) { _, phase in
+                    #if os(iOS)
+                    PrivacyShield.shared.setVisible(phase != .active)
+                    #endif
+                }
         }
     }
 }

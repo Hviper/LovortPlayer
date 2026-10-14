@@ -1,3 +1,6 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 import Translation
 import KSPlayer
@@ -6,8 +9,10 @@ import UIKit
 #endif
 
 public struct FullscreenVideoPlayerView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject public var viewModel = PlayerViewModel()
     @ObservedObject private var appleTranslation = AppleTranslationBridge.shared
+    @ObservedObject private var vault = VaultManager.shared
     @ObservedObject private var settings = AppSettings.shared
     public let videoURL: URL
     public let videoTitle: String
@@ -22,6 +27,8 @@ public struct FullscreenVideoPlayerView: View {
     @State private var isLandscape: Bool = false
     @State private var hideHUDTask: Task<Void, Never>? = nil
     @State private var initialVolume: Float = 0.5
+    @State private var initialBrightness: CGFloat = 0.5
+    @State private var panAxis: Int?
     @State private var showSubtitleTimeline = false
     @State private var showSubtitleExport = false
     @State private var bottomControlsHeight: CGFloat = 0
@@ -43,7 +50,7 @@ public struct FullscreenVideoPlayerView: View {
                 if viewModel.isCompatibilityMode,
                    let coordinator = viewModel.compatibilityCoordinator,
                    let options = viewModel.compatibilityOptions {
-                    KSVideoPlayer(coordinator: coordinator, url: videoURL, options: options)
+                    KSVideoPlayer(coordinator: coordinator, url: viewModel.playbackMediaURL ?? videoURL, options: options)
                         .ignoresSafeArea()
                 } else {
                     NativeVideoPlayerView(player: viewModel.player)
@@ -180,6 +187,10 @@ public struct FullscreenVideoPlayerView: View {
             }
         }
         .onPreferenceChange(SubtitleControlsHeightKey.self) { bottomControlsHeight = $0 }
+        .overlay { if isPrivate && !vault.isUnlocked { Color.black.ignoresSafeArea() } }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background && isPrivate { viewModel.cleanup(); onDismiss() }
+        }
         .translationTask(appleTranslation.configuration) { session in
             await appleTranslation.perform(using: session)
         }
@@ -323,7 +334,7 @@ public struct FullscreenVideoPlayerView: View {
                 Button {
                     VideoExportManager.shared.shareVideo(url: videoURL)
                 } label: {
-                    Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+                    Label("分享原视频", systemImage: "square.and.arrow.up")
                 }
 
                 Button {
@@ -331,13 +342,13 @@ public struct FullscreenVideoPlayerView: View {
                         await handleSaveToPhotos()
                     }
                 } label: {
-                    Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+                    Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
                 }
 
                 Button {
                     VideoExportManager.shared.saveToFiles(url: videoURL)
                 } label: {
-                    Label("存储到“文件”", systemImage: "folder.badge.plus")
+                    Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
                 }
             } label: {
                 Image(systemName: "square.and.arrow.up")
@@ -488,11 +499,14 @@ public struct FullscreenVideoPlayerView: View {
         let screenWidth = UIScreen.main.bounds.width
         let translation = value.translation
 
-        if abs(translation.width) > abs(translation.height) {
+        if panAxis == nil {
+            panAxis = abs(translation.width) > abs(translation.height) ? 0 : (value.startLocation.x < screenWidth / 2 ? 1 : 2)
+            panStartTime = viewModel.currentTime
+            initialBrightness = UIScreen.main.brightness
+            initialVolume = SystemVolumeController.shared.getCurrentVolume()
+        }
+        if panAxis == 0 {
             // 水平滑动：快进快退 seek
-            if panStartTime == 0 {
-                panStartTime = viewModel.currentTime
-            }
             let delta = TimeInterval(translation.width / 4.0)
             let target = max(0, min(viewModel.duration, panStartTime + delta))
             panTargetTime = target
@@ -503,16 +517,14 @@ public struct FullscreenVideoPlayerView: View {
             )
         } else {
             // 垂直滑动：左半屏调系统亮度，右半屏调系统真实音量
-            if value.startLocation.x < screenWidth / 2 {
-                let current = UIScreen.main.brightness
-                let newBrightness = max(0.0, min(1.0, current - translation.height / 5000.0))
+            if panAxis == 1 {
+                let newBrightness = max(0.0, min(1.0, initialBrightness - translation.height / 350.0))
                 UIScreen.main.brightness = newBrightness
                 showGestureHUD(icon: "sun.max.fill", text: "\(Int(newBrightness * 100))%", autoDismiss: false)
             } else {
                 // 右半屏调系统硬件音量与播放器音量
-                let currentVol = SystemVolumeController.shared.getCurrentVolume()
-                let delta = Float(-translation.height / 8000.0)
-                let newVol = max(0.0, min(1.0, currentVol + delta))
+                let delta = Float(-translation.height / 350.0)
+                let newVol = max(0.0, min(1.0, initialVolume + delta))
                 SystemVolumeController.shared.setVolume(newVol)
                 viewModel.volume = newVol
                 viewModel.player?.volume = newVol
@@ -524,11 +536,12 @@ public struct FullscreenVideoPlayerView: View {
     }
 
     private func handlePanEnded(_ value: DragGesture.Value) {
-        if panTargetTime > 0 {
+        if panAxis == 0 {
             viewModel.seek(to: panTargetTime)
             panStartTime = 0
             panTargetTime = 0
         }
+        panAxis = nil
         autoDismissHUD(after: 0.8)
     }
     #endif

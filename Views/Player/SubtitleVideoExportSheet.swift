@@ -1,9 +1,13 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 
 /// Export is explicit: generating subtitles and sharing the original video do not change the source file.
 struct SubtitleVideoExportSheet: View {
     let videoURL: URL
     let videoTitle: String
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
     @State private var mode: SubtitleVideoExportMode = .burnedIn
@@ -77,6 +81,9 @@ struct SubtitleVideoExportSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { dismiss() } } }
             .interactiveDismissDisabled(exporting || savingToPhotos)
             .onDisappear { cancelExport(); discardOutput() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background, videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/") { cancelExport(); discardOutput() }
+            }
             .onChange(of: mode) { _, _ in discardOutput(); savedToPhotos = false }
             .onChange(of: textMode) { _, _ in discardOutput(); savedToPhotos = false }
         }

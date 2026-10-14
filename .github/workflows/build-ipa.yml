@@ -37,6 +37,17 @@ jobs:
             -project LovortPlayer.xcodeproj \
             -scheme LovortPlayer
 
+      - name: Run iOS Core Tests
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if x.get("isAvailable") and x["name"].startswith("iPhone")))')
+          xcodebuild test \
+            -project LovortPlayer.xcodeproj \
+            -scheme LovortPlayer \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -derivedDataPath build/TestDerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO
+
       - name: Build Application (.app)
         run: |
           xcodebuild clean build \
@@ -45,6 +56,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -configuration Release \
             -derivedDataPath build/DerivedData \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \

@@ -17,7 +17,7 @@ public enum OfflineWhisperModel: String, CaseIterable, Codable, Identifiable, Se
         switch self {
         case .highAccuracy: return "高精度 · Large V3 Turbo（约 626 MB）"
         case .balanced: return "均衡 · Small"
-        case .compact: return "轻量 · Base"
+        case .compact: return "快速 · Base"
         }
     }
 
@@ -121,6 +121,7 @@ public actor LocalWhisperSubtitleService {
     public static let defaultUsesRelaxedVoiceDetection = false
     public static let previewUsesRelaxedVoiceDetection = true
 
+    private var computeDescription = "系统默认配置"
     private var activeTranscriptionCount: Int = 0
     private var idleUnloadTask: Task<Void, Never>?
     private var memoryWarningObserver: (any NSObjectProtocol)?
@@ -238,14 +239,17 @@ public actor LocalWhisperSubtitleService {
         completedChunkIndexes: Set<Int> = [],
         useRelaxedVoiceDetection: Bool = defaultUsesRelaxedVoiceDetection,
         onProgress: (@Sendable (String) -> Void)? = nil,
+        onEvent: (@Sendable (SubtitleProgressEvent) -> Void)? = nil,
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> [SubtitleLine]?)? = nil
     ) async throws -> [SubtitleLine] {
         // Actor methods may interleave at every await. Keep WhisperKit's mutable
         // pipeline exclusive when a preview and a full task arrive together.
         while activeTranscriptionCount > 0 {
+            onEvent?(.phase(.waitingForModel))
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 150_000_000)
         }
+        onEvent?(.phase(.waitingForModel))
         setupMemoryWarningObserverIfNeeded()
         idleUnloadTask?.cancel()
         idleUnloadTask = nil
@@ -270,6 +274,8 @@ public actor LocalWhisperSubtitleService {
             let prewarmKey = "LovortWhisperPrewarmed.\(model.rawValue)"
             let shouldPrewarm = !(alreadyInstalled && UserDefaults.standard.bool(forKey: prewarmKey))
 
+            let loadingStarted = Date()
+            computeDescription = "系统默认配置"
             var loadedPipeline: WhisperKit?
             do {
                 loadedPipeline = try await WhisperKit(
@@ -285,6 +291,7 @@ public actor LocalWhisperSubtitleService {
                 )
             } catch {
                 // 如果默认配置加载失败（如 ANE / CoreML 神经引擎读取报错），尝试回退到 GPU + CPU 兼容模式
+                computeDescription = "CPU + GPU 兼容回退"
                 let fallbackCompute = ModelComputeOptions(
                     melCompute: .cpuAndGPU,
                     audioEncoderCompute: .cpuAndGPU,
@@ -316,6 +323,7 @@ public actor LocalWhisperSubtitleService {
             }
 
             UserDefaults.standard.set(true, forKey: prewarmKey)
+            await SubtitlePerformanceLog.shared.record(stage: "模型加载", model: model.rawValue, seconds: Date().timeIntervalSince(loadingStarted), backend: computeDescription)
             pipeline = loadedPipeline
             loadedModel = model
         }
@@ -398,7 +406,10 @@ public actor LocalWhisperSubtitleService {
             )
             prefetchedTask = nil
 
+            onEvent?(.phase(.preparingAudio))
+            let extractionStarted = Date()
             let sliceURL = try await currentTask.value
+            await SubtitlePerformanceLog.shared.record(stage: "切片等待（含预取）", model: model.rawValue, seconds: Date().timeIntervalSince(extractionStarted))
             defer {
                 try? FileManager.default.removeItem(at: sliceURL)
             }
@@ -417,11 +428,36 @@ public actor LocalWhisperSubtitleService {
             }
 
             onProgress?("正在离线生成第 \(completed.count + 1)/\(totalChunks) 个字幕分片...")
+            onEvent?(.transcription(completed: completed.count, total: totalChunks))
+            var prefixLines: [SubtitleLine] = []
+            let prefixLength: Float = 20
+            let splitFirst = orderOffset == 0 && sliceDuration > Double(prefixLength) + 5
+            if splitFirst {
+                let prefix = try await transcribeSingleAudio(pipeline: pipeline, audioURL: sliceURL, languageCode: resolvedLanguageCode,
+                    offset: start, chunkNumber: completed.count + 1, totalChunks: totalChunks,
+                    useRelaxedVoiceDetection: useRelaxedVoiceDetection, onProgress: onProgress, clipRange: 0...prefixLength)
+                prefixLines = prefix.lines
+                if resolvedLanguageCode == nil, !prefix.lines.isEmpty { resolvedLanguageCode = prefix.detectedLanguage }
+                lines.removeAll { $0.startTime >= start && $0.startTime < start + sliceDuration }
+                lines.append(contentsOf: prefixLines)
+                lines.sort { $0.startTime < $1.startTime }
+                if let onPartialResult, let merged = await onPartialResult(ProgressiveUpdate(lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: totalChunks, latestChunkIndex: chunkIndex, latestChunkLines: prefixLines)) {
+                    lines = merged
+                    prefixLines = merged.filter { $0.startTime >= start && $0.startTime < start + Double(prefixLength) }
+                }
+            }
+            var remainingURL: URL?
+            defer { if let remainingURL { try? FileManager.default.removeItem(at: remainingURL) } }
+            if splitFirst {
+                let output = FileManager.default.temporaryDirectory.appendingPathComponent("lovort-remainder-\(UUID().uuidString).m4a")
+                remainingURL = output
+                try await exportAudioSlice(mediaURL: audioURL, sourceLanguage: sourceLanguage, start: start + Double(prefixLength), duration: sliceDuration - Double(prefixLength), outputURL: output)
+            }
             let chunkResult = try await transcribeSingleAudio(
                 pipeline: pipeline,
-                audioURL: sliceURL,
+                audioURL: remainingURL ?? sliceURL,
                 languageCode: resolvedLanguageCode,
-                offset: start,
+                offset: start + (splitFirst ? Double(prefixLength) : 0),
                 chunkNumber: completed.count + 1,
                 totalChunks: totalChunks,
                 useRelaxedVoiceDetection: useRelaxedVoiceDetection,
@@ -433,12 +469,13 @@ public actor LocalWhisperSubtitleService {
                 resolvedLanguageCode = detected
             }
 
-            let chunkLines = chunkResult.lines
+            let chunkLines = prefixLines + chunkResult.lines
             let rangeEnd = start + sliceDuration
             lines.removeAll { $0.startTime >= start && $0.startTime < rangeEnd }
             lines.append(contentsOf: chunkLines)
             lines.sort { $0.startTime < $1.startTime }
             completed.insert(chunkIndex)
+            onEvent?(.transcription(completed: completed.count, total: totalChunks))
 
             if let onPartialResult {
                 let returnedLines = await onPartialResult(ProgressiveUpdate(
@@ -466,17 +503,22 @@ public actor LocalWhisperSubtitleService {
         chunkNumber: Int,
         totalChunks: Int,
         useRelaxedVoiceDetection: Bool,
-        onProgress: (@Sendable (String) -> Void)?
+        onProgress: (@Sendable (String) -> Void)?,
+        clipRange: ClosedRange<Float>? = nil
     ) async throws -> (lines: [SubtitleLine], detectedLanguage: String?) {
+        let started = Date()
+        let requestedWorkers = UserDefaults.standard.integer(forKey: "subtitle.workers")
+        let workers = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue ? 1 : ([1, 2, 4].contains(requestedWorkers) ? requestedWorkers : 4)
         let options = DecodingOptions(
             task: .transcribe,
             language: languageCode,
             detectLanguage: languageCode == nil,
             skipSpecialTokens: true,
             wordTimestamps: false,
+            clipTimestamps: clipRange.map { [$0.lowerBound, $0.upperBound] } ?? [],
             noSpeechThreshold: useRelaxedVoiceDetection ? nil : 0.6,
-            concurrentWorkerCount: 4,
-            chunkingStrategy: useRelaxedVoiceDetection ? ChunkingStrategy.none : .vad
+            concurrentWorkerCount: workers,
+            chunkingStrategy: useRelaxedVoiceDetection || clipRange != nil ? ChunkingStrategy.none : .vad
         )
         let throttle = ProgressThrottleBox()
         let inputOptions = AudioInputOptions(channelMode: .sumChannels(nil), audioLoadingMode: .fullFile)
@@ -493,9 +535,13 @@ public actor LocalWhisperSubtitleService {
                 return true
             }
         )
+        await SubtitlePerformanceLog.shared.record(stage: "离线转写", model: loadedModel?.rawValue ?? "", seconds: Date().timeIntervalSince(started), workers: workers, backend: computeDescription)
         try Task.checkCancellation()
         guard let first = results.first else { throw serviceError("离线模型没有返回转写结果") }
         let transcriptionResults = try first.get()
+        await SubtitlePerformanceLog.shared.record(stage: "音频读入", model: loadedModel?.rawValue ?? "", seconds: transcriptionResults.reduce(0) { $0 + $1.timings.audioLoading })
+        await SubtitlePerformanceLog.shared.record(stage: "编码推理", model: loadedModel?.rawValue ?? "", seconds: transcriptionResults.reduce(0) { $0 + $1.timings.encoding })
+        await SubtitlePerformanceLog.shared.record(stage: "解码与重试", model: loadedModel?.rawValue ?? "", seconds: transcriptionResults.reduce(0) { $0 + $1.timings.decodingLoop }, workers: workers)
         let detectedLanguage: String? = transcriptionResults.first?.language
         let segments = transcriptionResults.flatMap(\.segments).sorted { $0.start < $1.start }
         var lines: [SubtitleLine] = []

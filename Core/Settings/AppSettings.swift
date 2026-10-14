@@ -159,20 +159,12 @@ public final class AppSettings: ObservableObject {
     }
 
     public func clearCache() async {
-        let fm = FileManager.default
-        let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
-        let tempDir = fm.temporaryDirectory
-
-        for dir in [cacheDir, Optional(tempDir)].compactMap({ $0 }) {
-            if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-                for url in contents {
-                    try? fm.removeItem(at: url)
-                }
-            }
-        }
-        await MainActor.run {
-            cacheSizeBytes = 0
-        }
+        await ThumbnailStore.shared.clear()
+        await SubtitleVideoExporter.shared.cleanupExpired()
+        // Temporary audio/upload files and vault leases belong to running services.
+        // Their owners clean up at completion; never recursively clear those roots.
+        let remaining = await Task.detached(priority: .utility) { Self.calculateCacheSize() }.value
+        await MainActor.run { cacheSizeBytes = remaining }
     }
 
     // MARK: - 还原所有设置

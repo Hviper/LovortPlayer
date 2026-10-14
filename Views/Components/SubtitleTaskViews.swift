@@ -1,3 +1,6 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 
 public struct FloatingSubtitleTaskCapsule: View {
@@ -20,7 +23,7 @@ public struct FloatingSubtitleTaskCapsule: View {
                 .frame(width: 40, height: 40)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(task.videoTitle)
+                    Text(task.isPrivate == true ? "私密视频" : task.videoTitle)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -114,7 +117,7 @@ public struct SubtitleTaskCenterView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(task.videoTitle)
+                    Text(task.isPrivate == true ? "私密视频" : task.videoTitle)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
                         .lineLimit(2)

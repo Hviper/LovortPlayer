@@ -41,8 +41,8 @@ public enum SubtitleTaskPhase: String, Codable, Sendable {
 
 public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
     public let id: UUID
-    public let videoURL: URL
-    public let videoTitle: String
+    public var videoURL: URL
+    public var videoTitle: String
     public var phase: SubtitleTaskPhase
     public var statusText: String
     public var transcriptionProgress: Double
@@ -64,6 +64,7 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
     public var updatedAt: Date
     public var completedAt: Date?
     public var errorMessage: String?
+    public var mediaID: UUID? = nil
 
     public var overallProgress: Double {
         switch phase {
@@ -100,6 +101,7 @@ public final class SubtitleTaskManager: ObservableObject {
     private var workerTask: Task<Void, Never>?
     private var runningTaskID: UUID?
     private var runTokens: [UUID: UUID] = [:]
+    private var runPermits: [UUID: SubtitleRunPermit] = [:]
     private let storeURL: URL
 
     private init() {
@@ -128,6 +130,7 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     public func subtitles(for videoURL: URL) -> [SubtitleLine]? {
+        if (videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")), !VaultManager.shared.isUnlocked { return nil }
         if let live = liveSubtitles[videoKey(videoURL)], !live.isEmpty { return live }
         return AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: videoURL)
     }
@@ -235,7 +238,8 @@ public final class SubtitleTaskManager: ObservableObject {
             createdAt: Date(),
             updatedAt: Date(),
             completedAt: nil,
-            errorMessage: nil
+            errorMessage: nil,
+            mediaID: MediaIdentityStore.shared.id(for: videoURL)
         )
         tasks.append(item)
         trimHistory()
@@ -252,6 +256,7 @@ public final class SubtitleTaskManager: ObservableObject {
         saveTasks()
         if runningTaskID == id {
             runTokens[id] = nil
+            runPermits[id]?.invalidate()
             workerTask?.cancel()
         }
     }
@@ -274,6 +279,7 @@ public final class SubtitleTaskManager: ObservableObject {
         saveTasks()
         if runningTaskID == id {
             runTokens[id] = nil
+            runPermits[id]?.invalidate()
             workerTask?.cancel()
         }
     }
@@ -282,6 +288,23 @@ public final class SubtitleTaskManager: ObservableObject {
         let key = videoKey(videoURL)
         let matchingIDs = tasks.filter { videoKey($0.videoURL) == key && $0.phase.isActive }.map(\.id)
         for id in matchingIDs { cancel(id) }
+    }
+
+    public func pauseTasks(for videoURL: URL) {
+        for task in tasks where task.videoURL == videoURL && task.phase.isActive { pause(task.id) }
+        flushTasks()
+    }
+
+    public func relocateTasks(from source: URL, to destination: URL, isPrivate: Bool) {
+        let identity = MediaIdentityStore.shared.id(for: source)
+        for task in tasks where task.videoURL == source && task.phase.isActive { pause(task.id) }
+        for index in tasks.indices where tasks[index].videoURL == source {
+            tasks[index].videoURL = destination
+            tasks[index].videoTitle = destination.lastPathComponent
+            tasks[index].mediaID = identity
+            tasks[index].isPrivate = isPrivate
+        }
+        flushTasks()
     }
 
     public func purgeTasks(for videoURL: URL) {
@@ -312,9 +335,11 @@ public final class SubtitleTaskManager: ObservableObject {
         runningTaskID = next.id
         let runToken = UUID()
         runTokens[next.id] = runToken
+        runPermits[next.id] = SubtitleRunPermit()
         workerTask = Task { [weak self] in
             guard let self else { return }
             await self.execute(next.id, runToken: runToken)
+            self.runPermits.removeValue(forKey: next.id)?.invalidate()
             self.runTokens[next.id] = nil
             self.runningTaskID = nil
             self.workerTask = nil
@@ -349,7 +374,11 @@ public final class SubtitleTaskManager: ObservableObject {
                 },
                 onPartialResult: { [weak self] partialLines in
                     await self?.applyPartialLines(partialLines, to: id, runToken: runToken)
-                }
+                },
+                onEvent: { [weak self] event in
+                    Task { @MainActor in self?.applyEvent(event, to: id, runToken: runToken) }
+                },
+                cachePermit: runPermits[id]
             )
             try Task.checkCancellation()
             guard runTokens[id] == runToken else { throw CancellationError() }
@@ -427,48 +456,29 @@ public final class SubtitleTaskManager: ObservableObject {
 
     private func applyStatus(_ status: String, to id: UUID, runToken: UUID) {
         guard runningTaskID == id, runTokens[id] == runToken, let index = index(of: id), tasks[index].phase.isActive else { return }
-        let oldPhase = tasks[index].phase
         tasks[index].statusText = status
-        if status.contains("准备离线模型") || status.contains("加载离线模型") {
-            tasks[index].phase = .waitingForModel
-        } else if status.contains("提取") || status.contains("音轨") {
-            tasks[index].phase = .preparingAudio
-        } else if status.contains("流式翻译") {
+    }
+
+    private func applyEvent(_ event: SubtitleProgressEvent, to id: UUID, runToken: UUID) {
+        guard runningTaskID == id, runTokens[id] == runToken, let index = index(of: id), tasks[index].phase.isActive else { return }
+        switch event {
+        case .phase(let phase): tasks[index].phase = phase
+        case .transcription(let completed, let total):
             tasks[index].phase = .transcribing
-        } else if status.contains("翻译") || status.contains("精修") {
-            tasks[index].phase = .translating
-            if let fraction = fraction(in: status) {
-                tasks[index].translatedBatches = fraction.current
-                tasks[index].totalTranslationBatches = fraction.total
-                tasks[index].translationProgress = Double(fraction.current) / Double(fraction.total)
-            }
-        } else if status.contains("字幕分片") || status.contains("转写") || status.contains("识别") {
-            tasks[index].phase = .transcribing
-            if let fraction = fraction(in: status) {
-                tasks[index].totalChunks = max(tasks[index].totalChunks, fraction.total)
-                let completedBeforeCurrent = max(0, fraction.current - 1)
-                if tasks[index].completedChunks < completedBeforeCurrent {
-                    tasks[index].completedChunks = completedBeforeCurrent
-                    tasks[index].transcriptionProgress = Double(completedBeforeCurrent) / Double(fraction.total)
-                }
-            }
-        }
-        tasks[index].updatedAt = Date()
-        if tasks[index].phase != oldPhase {
-            saveTasks()
+            tasks[index].completedChunks = completed
+            tasks[index].totalChunks = total
+            tasks[index].transcriptionProgress = total > 0 ? Double(completed) / Double(total) : 0
+        case .translation(let completed, let total):
+            if tasks[index].transcriptionProgress >= 1 { tasks[index].phase = .translating }
+            tasks[index].translatedBatches = completed
+            tasks[index].totalTranslationBatches = total
+            tasks[index].translationProgress = total > 0 ? min(tasks[index].transcriptionProgress, Double(completed) / Double(total)) : 0
         }
     }
 
-    private func fraction(in text: String) -> (current: Int, total: Int)? {
-        let pattern = #"(\d+)\s*/\s*(\d+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              match.numberOfRanges == 3,
-              let currentRange = Range(match.range(at: 1), in: text),
-              let totalRange = Range(match.range(at: 2), in: text),
-              let current = Int(text[currentRange]),
-              let total = Int(text[totalRange]), total > 0 else { return nil }
-        return (current, total)
+    public func pausePrivateTasks() {
+        for task in tasks where task.isPrivate == true && task.phase.isActive { pause(task.id) }
+        for task in tasks where task.isPrivate == true { liveSubtitles[videoKey(task.videoURL)] = nil }
     }
 
     private func update(_ id: UUID, mutation: (inout SubtitleTaskItem) -> Void) {
@@ -498,7 +508,7 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     private func videoKey(_ url: URL) -> String {
-        url.standardizedFileURL.path
+        MediaIdentityStore.shared.id(for: url).uuidString
     }
 
     private func loadTasks() {
@@ -507,9 +517,15 @@ public final class SubtitleTaskManager: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         tasks = (try? decoder.decode([SubtitleTaskItem].self, from: data)) ?? []
         tasks.removeAll { !FileManager.default.fileExists(atPath: $0.videoURL.path) }
+        for index in tasks.indices { tasks[index].mediaID = MediaIdentityStore.shared.id(for: tasks[index].videoURL) }
     }
 
+    private var persistTask: Task<Void, Never>?
     private func saveTasks() {
+        persistTask?.cancel()
+        persistTask = Task { try? await Task.sleep(for: .milliseconds(400)); guard !Task.isCancelled else { return }; flushTasks() }
+    }
+    public func flushTasks() {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

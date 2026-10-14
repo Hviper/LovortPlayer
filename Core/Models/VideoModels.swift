@@ -31,7 +31,7 @@ public struct VideoItem: Identifiable, Sendable, Codable {
     }
 }
 
-public struct SubtitleLine: Identifiable, Sendable, Codable {
+public struct SubtitleLine: Identifiable, Sendable, Codable, Equatable {
     public let id: UUID
     public let startTime: TimeInterval
     public let endTime: TimeInterval

@@ -51,7 +51,9 @@ public final class SubtitleVideoExporter {
         cleanupExpired()
         let access = videoURL.startAccessingSecurityScopedResource()
         defer { if access { videoURL.stopAccessingSecurityScopedResource() } }
-        let asset = AVURLAsset(url: videoURL)
+        let readable = try await VaultManager.shared.readableURL(for: videoURL)
+        defer { VaultManager.shared.releaseReadableURL(readable) }
+        let asset = AVURLAsset(url: readable)
         let duration = try await asset.load(.duration)
         let cues = try SubtitleExportTimeline.make(lines: lines, duration: duration.seconds, textMode: textMode)
         let videoTracks = try await asset.loadTracks(withMediaType: .video)

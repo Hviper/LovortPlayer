@@ -2,113 +2,143 @@ import Foundation
 import CryptoKit
 import LocalAuthentication
 import Security
+import CommonCrypto
+import Combine
 
-public final class VaultManager: @unchecked Sendable {
+@MainActor
+public final class VaultManager: ObservableObject {
     public static let shared = VaultManager()
-
+    @Published public private(set) var isUnlocked = false
+    public private(set) var isDecoyMode = false
     private let keyTag = "com.lovortplayer.vault.masterkey"
-    public private(set) var isUnlocked = false
-    public private(set) var isDecoyMode = false // 诱导假密码模式
-
-    private let realPasswordKey = "LovortVaultRealPassword"
-    private let decoyPasswordKey = "LovortVaultDecoyPassword"
-
-    private init() {}
-
-    /// 生物识别（Face ID / Touch ID）解锁
+    private let pinTag = "com.lovortplayer.vault.pin.v2"
+    private var failures = UserDefaults.standard.integer(forKey: "vault.failedAttempts") {
+        didSet { UserDefaults.standard.set(failures, forKey: "vault.failedAttempts") }
+    }
+    private var blockedUntil = Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: "vault.blockedUntil")) {
+        didSet { UserDefaults.standard.set(blockedUntil.timeIntervalSince1970, forKey: "vault.blockedUntil") }
+    }
+    private var session = UUID()
+    private var readableFiles: Set<URL> = []
+    private let readableDirectory: URL
+    private init() {
+        readableDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("VaultReadable", isDirectory: true)
+        // Files left by a terminated process have no living consumers.
+        try? FileManager.default.removeItem(at: readableDirectory)
+    }
+    public var hasPassword: Bool { readKeychain(pinTag) != nil }
+    public var retryAfter: Int { max(0, Int(ceil(blockedUntil.timeIntervalSinceNow))) }
+    public func setPassword(_ pin: String) async throws {
+        let token = session
+        if !hasPassword {
+            let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(".Vault")
+            let hasExistingFiles = !((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []).isEmpty
+            if hasExistingFiles || readKeychain(keyTag) != nil {
+                let context = LAContext()
+                guard try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "验证设备身份，为已有保险箱设置新密码") else { throw error("身份验证未完成") }
+                guard token == session else { throw error("保险箱设置已取消") }
+            }
+        }
+        guard !hasPassword || isUnlocked else { throw error("请先解锁保险箱再修改密码") }
+        guard pin.count >= 6, pin.count <= 12, pin.allSatisfy({ $0.isASCII && $0.isNumber }) else { throw error("请使用 6–12 位数字密码") }
+        var salt = Data(count: 16)
+        let status = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        guard status == errSecSuccess else { throw error("无法生成密码盐") }
+        try writeKeychain(pinTag, data: salt + derivePIN(pin, salt: salt))
+        UserDefaults.standard.removeObject(forKey: "LovortVaultRealPassword")
+        UserDefaults.standard.removeObject(forKey: "LovortVaultDecoyPassword")
+        failures = 0
+        blockedUntil = .distantPast
+    }
+    private func derivePIN(_ pin: String, salt: Data) -> Data {
+        var result = Data(count: 32)
+        let bytes = Array(pin.utf8)
+        _ = bytes.withUnsafeBytes { password in
+            salt.withUnsafeBytes { saltBytes in
+                result.withUnsafeMutableBytes { output in
+                    CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2), password.baseAddress!.assumingMemoryBound(to: Int8.self), bytes.count,
+                        saltBytes.baseAddress!.assumingMemoryBound(to: UInt8.self), salt.count, CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256), 100_000,
+                        output.baseAddress!.assumingMemoryBound(to: UInt8.self), 32)
+                }
+            }
+        }
+        return result
+    }
+    public func verifyPassword(_ pin: String) -> (success: Bool, isDecoy: Bool) {
+        guard pin.count >= 6, pin.count <= 12, pin.allSatisfy({ $0.isASCII && $0.isNumber }), Date() >= blockedUntil, let record = readKeychain(pinTag), record.count == 48 else { return (false, false) }
+        let derived = derivePIN(pin, salt: record.prefix(16))
+        let difference = zip(derived, record.suffix(32)).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) }
+        if difference == 0 { isUnlocked = true; failures = 0; return (true, false) }
+        failures += 1
+        if failures >= 5 { blockedUntil = Date().addingTimeInterval(30); failures = 0 }
+        return (false, false)
+    }
     public func authenticateWithBiometrics() async -> (success: Bool, error: String?) {
+        guard hasPassword else { return (false, "请先设置保险箱密码") }
+        let token = session
         let context = LAContext()
         context.localizedCancelTitle = "取消"
-        var error: NSError?
-
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            return (false, error?.localizedDescription ?? "设备未开启生物识别")
-        }
-
         do {
-            let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: "解锁私密视频保险箱"
-            )
-            self.isUnlocked = success
-            self.isDecoyMode = false
+            let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "解锁私密视频保险箱")
+            guard token == session else { return (false, "验证已取消") }
+            isUnlocked = success
             return (success, nil)
-        } catch {
-            return (false, error.localizedDescription)
-        }
+        } catch { return (false, error.localizedDescription) }
     }
-
-    /// 数字密码验证（包含真密码与诱导假密码）
-    public func verifyPassword(_ pin: String) -> (success: Bool, isDecoy: Bool) {
-        let savedReal = UserDefaults.standard.string(forKey: realPasswordKey) ?? "1234"
-        let savedDecoy = UserDefaults.standard.string(forKey: decoyPasswordKey) ?? "0000"
-
-        if pin == savedReal {
-            self.isUnlocked = true
-            self.isDecoyMode = false
-            return (true, false)
-        } else if pin == savedDecoy {
-            // 进入反侦察虚假空间：显示解锁成功，但实际上过滤出空列表或假视频
-            self.isUnlocked = true
-            self.isDecoyMode = true
-            return (true, true)
-        } else {
-            return (false, false)
-        }
+    public func lockVault() { session = UUID(); isUnlocked = false; isDecoyMode = false }
+    public func encryptFile(at source: URL, destinationURL destination: URL) async throws {
+        guard hasPassword else { throw error("请先设置保险箱密码") }
+        let key = try masterKey()
+        let task = Task.detached(priority: .utility) { try VaultFileCryptor.encrypt(source: source, destination: destination, key: key) }
+        try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
-
-    /// 锁定保险箱
-    public func lockVault() {
-        self.isUnlocked = false
-        self.isDecoyMode = false
+    public func decryptFile(at source: URL, destinationURL destination: URL) async throws {
+        guard isUnlocked else { throw error("请先解锁保险箱") }
+        let key = try masterKey()
+        let task = Task.detached(priority: .utility) { try VaultFileCryptor.decrypt(source: source, destination: destination, key: key) }
+        try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
-
-    // MARK: - AES-256 GCM 磁盘物理加密
-    public func encryptFile(at sourceURL: URL, destinationURL: URL) throws {
-        let key = getOrCreateMasterKey()
-        let fileData = try Data(contentsOf: sourceURL)
-        let sealedBox = try AES.GCM.seal(fileData, using: key)
-        guard let combined = sealedBox.combined else {
-            throw NSError(domain: "VaultError", code: -1, userInfo: [NSLocalizedDescriptionKey: "AES-256 加密封装失败"])
-        }
-        try combined.write(to: destinationURL)
+    public func readableURL(for url: URL) async throws -> URL {
+        guard url.pathExtension.lowercased() == "vault" || url.path.contains("/.Vault/") else { return url }
+        guard isUnlocked else { throw error("请先解锁保险箱") }
+        guard url.pathExtension.lowercased() == "vault" else { return url }
+        let token = session
+        try FileManager.default.createDirectory(at: readableDirectory, withIntermediateDirectories: true)
+        #if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: readableDirectory.path)
+        #endif
+        let output = readableDirectory.appendingPathComponent(UUID().uuidString + "-" + url.deletingPathExtension().lastPathComponent)
+        do {
+            try await decryptFile(at: url, destinationURL: output)
+            try Task.checkCancellation()
+            guard token == session, isUnlocked else { throw error("保险箱已锁定") }
+            readableFiles.insert(output)
+            return output
+        } catch { try? FileManager.default.removeItem(at: output); throw error }
     }
-
-    public func decryptFile(at sourceURL: URL, destinationURL: URL) throws {
-        let key = getOrCreateMasterKey()
-        let encryptedData = try Data(contentsOf: sourceURL)
-        let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
-        let decryptedData = try AES.GCM.open(sealedBox, using: key)
-        try decryptedData.write(to: destinationURL)
+    public func releaseReadableURL(_ url: URL) {
+        guard readableFiles.remove(url) != nil else { return }
+        try? FileManager.default.removeItem(at: url)
     }
-
-    public func decryptToTemporaryPlaybackURL(encryptedURL: URL) throws -> URL {
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "_" + encryptedURL.deletingPathExtension().lastPathComponent)
-        try decryptFile(at: encryptedURL, destinationURL: tempURL)
-        return tempURL
+    private func masterKey() throws -> SymmetricKey {
+        if let data = readKeychain(keyTag) { return SymmetricKey(data: data) }
+        let key = SymmetricKey(size: .bits256)
+        try writeKeychain(keyTag, data: key.withUnsafeBytes { Data($0) })
+        return key
     }
-
-    public func getOrCreateMasterKey() -> SymmetricKey {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: keyTag,
-            kSecReturnData as String: true
-        ]
+    private func readKeychain(_ account: String) -> Data? {
         var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data {
-            return SymmetricKey(data: data)
-        }
-
-        // 新建并安全存入 Keychain
-        let newKey = SymmetricKey(size: .bits256)
-        let keyData = newKey.withUnsafeBytes { Data($0) }
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: keyTag,
-            kSecValueData as String: keyData
-        ]
-        SecItemAdd(addQuery as CFDictionary, nil)
-        return newKey
+        let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword, kSecAttrAccount: account,
+            kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne] as CFDictionary, &item)
+        return status == errSecSuccess ? item as? Data : nil
     }
+    private func writeKeychain(_ account: String, data: Data) throws {
+        let query = [kSecClass: kSecClassGenericPassword, kSecAttrAccount: account] as CFDictionary
+        let status: OSStatus
+        if readKeychain(account) != nil { status = SecItemUpdate(query, [kSecValueData: data] as CFDictionary) }
+        else { status = SecItemAdd([kSecClass: kSecClassGenericPassword, kSecAttrAccount: account, kSecValueData: data,
+                                   kSecAttrAccessible: kSecAttrAccessibleWhenUnlocked] as CFDictionary, nil) }
+        guard status == errSecSuccess else { throw error("无法安全保存保险箱凭据，请解锁设备后重试") }
+    }
+    private func error(_ text: String) -> NSError { NSError(domain: "Vault", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
 }

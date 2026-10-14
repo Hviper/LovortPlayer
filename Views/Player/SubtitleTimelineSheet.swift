@@ -1,3 +1,6 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 
 public struct SubtitleTimelineSheet: View {

@@ -14,7 +14,7 @@
 | **无损剪辑** | GOP Passthrough 剪裁 | ✅ 已完成 | `Core/Clip/LosslessClipManager.swift`<br>`Views/Player/InPlayerClipBar.swift` | 播放内标记 In/Out 毫秒点，秒级无损码流复制导出 |
 | **局域网直传** | 流式 HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 一次性口令、流式落盘、空间/格式校验、自动入库，避免大文件驻留内存 |
 | **媒体库** | 16:9 卡片瀑布流 | ✅ 已完成 | `Views/Main/MediaLibraryHomeView.swift`<br>`Views/Main/VideoCardView.swift` | 封面卡片流、时长/分辨率标签、分类 Tabs |
-| **AI 字幕引擎** | 渐进式离线转写 + 多翻译服务 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/SubtitleTranslationProvider.swift` | 播放点优先的 4 分钟分片、断点缓存；Apple/智谱/火山方舟/自定义 API/DeepL/Google/Azure/GPT 翻译；双语 JSON/SRT |
+| **AI 字幕引擎** | 渐进式离线转写 + 多翻译服务 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/SubtitleTranslationProvider.swift` | 播放点优先的 4 分钟分片、断点缓存；Apple/火山机器翻译/智谱/火山方舟/自定义 API/DeepL/Google/Azure/GPT 翻译；双语 JSON/SRT |
 | **视频导出** | 分享 / 相册 / 文件 | ✅ 已完成 | `Core/Export/VideoExportManager.swift` | 系统分享面板、保存到系统相册、导出到“文件”App |
 | **GPT 语境精修** | 可选字幕导演模式 | ✅ 已完成 | `Core/AISubtitle/CloudAISubtitleService.swift` | 在普通翻译后统一人物称谓、敬语、俚语和角色口吻；需要 OpenAI Platform API Key |
 | **CI / CD** | GitHub Actions 自动打包 | ✅ 已完成 | `.github/workflows/build-ipa.yml` | 提交代码自动触发云端 macOS 构建并发布到 Releases |
@@ -81,7 +81,7 @@ cd LovortPlayer
 
 - 可在“设置 → 离线字幕与模型”提前下载、选择或删除 WhisperKit 模型，并查看真实下载进度与存储占用。
 - 视频卡片菜单可直接创建双语字幕任务，无需先进入播放器。
-- 字幕任务由 App 级串行队列管理；离开播放器后继续执行，每个 4 分钟分片完成后立即保存，异常退出后可从检查点恢复。
+- 字幕任务由 App 级串行队列管理；离开播放器后继续执行，首片先处理 20 秒，后续按 4 分钟分片续做；原文和翻译分批保存，异常退出后可从检查点恢复。
 - 首页任务胶囊与“字幕任务”页面分别展示原文转写和中文翻译进度，支持暂停、继续、取消和失败重试。
 - 正在观看的视频会即时接入已生成分片；完成后保存原文、中文、双语 SRT，并提供 App 内提示与可选系统通知。
 6. 长视频按 4 分钟分片，优先处理当前播放点附近；每片完成立即显示并写入断点缓存。双语结果写入 `.lovort-subtitles.json` 和标准 `.srt`。
@@ -96,3 +96,25 @@ cd LovortPlayer
 译文缺失时保留原文。导出保留原视频，提供进度和取消；字幕未生成完时会说明只导出当前已完成部分。导出文件在分享/保存期间保留，关闭页面或重新导出后清理；应用中断遗留的临时文件会在一天后清理。系统无法解码或写入 MP4 的格式会显示错误。
 
 播放字幕按视频实际显示区域定位，自动适配横竖屏及刘海/底部安全区；控制栏显示时避开控制栏。导出字幕按短边计算字号，避免竖屏字号过大。
+
+### 体验与可靠性
+
+- 首页支持搜索、排序和继续观看；媒体 ID 在文件移动后保留，避免同名视频共用播放进度。
+- 原文转写与翻译可并行推进。翻译失败保留原文和成功译文，重试复用已有转写；取消任务会拒绝旧任务继续写入。
+- 字幕内容、字号、位置记住上次设置，时间偏移和原文语言按视频保存。分享菜单明确区分原视频与带字幕导出。
+- 同名导入保留两份，先完成临时副本再提交。移动到私密空间前暂停字幕任务，将支持的旁字幕一起加密。
+- 保险箱首次使用需设置 6–12 位密码，没有默认密码。已有保险箱首次设置新密码需设备身份验证；进入后台遮挡画面并锁定。新加密格式分块处理大视频，兼容旧密文读取。
+- 清理缓存仅删除缩略图和过期导出，不移除播放、字幕处理、模型下载或分享正在使用的文件。
+
+### 性能诊断与验证
+
+“设置 → 字幕性能诊断”记录模型加载、转写和翻译的实际耗时及内存采样，可导出诊断 JSON。播放器的短片预览支持比较同一片段的模型/工作数；发热严重时降低工作数。工作数并非线性加速保证，iPhone 13 的最佳组合应以真机比较结果为准；已有高精度模型选择保持不变。
+
+XcodeGen 将 Core 编译为独立框架，App 引用该模块。GitHub Actions 先运行 iOS 模拟器 XCTest，再构建设备 Release IPA；版本 build 使用工作流运行编号。完整验证命令：
+
+```sh
+xcodegen generate
+xcodebuild test -project LovortPlayer.xcodeproj -scheme LovortPlayer -destination 'platform=iOS Simulator,name=iPhone 16' CODE_SIGNING_ALLOWED=NO SWIFT_ENABLE_EXPLICIT_MODULES=NO
+```
+
+模型下载完成后，离线转写无需网络；第三方翻译和 GPT 精修需要网络，Apple 翻译需已安装对应语言包。iOS 对后台运行时长有限制，长任务建议保持 App 前台，暂停后可从检查点继续。

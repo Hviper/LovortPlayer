@@ -4,6 +4,11 @@ import AVFoundation
 import Photos
 #endif
 
+private final class ClipSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+    init(_ session: AVAssetExportSession) { self.session = session }
+}
+
 public final class LosslessClipManager: @unchecked Sendable {
     public static let shared = LosslessClipManager()
 
@@ -14,7 +19,8 @@ public final class LosslessClipManager: @unchecked Sendable {
         assetURL: URL,
         outputURL: URL,
         startTime: CMTime,
-        endTime: CMTime
+        endTime: CMTime,
+        saveToPhotos: Bool = true
     ) async throws {
         let asset = AVURLAsset(url: assetURL)
         
@@ -43,24 +49,18 @@ public final class LosslessClipManager: @unchecked Sendable {
         exportSession.outputFileType = .mp4
         exportSession.timeRange = CMTimeRangeFromTimeToTime(start: startTime, end: endTime)
 
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-
-        await exportSession.export()
-
-        if exportSession.status != .completed {
-            let error = exportSession.error ?? NSError(
-                domain: "ClipError",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "剪辑导出失败: \(exportSession.error?.localizedDescription ?? "未知错误")"]
-            )
-            throw error
-        }
+        guard !FileManager.default.fileExists(atPath: outputURL.path) else { throw CocoaError(.fileWriteFileExists) }
+        let box = ClipSessionBox(exportSession)
+        do {
+            try await withTaskCancellationHandler {
+                try await exportSession.export(to: outputURL, as: .mp4)
+            } onCancel: { box.session.cancelExport() }
+            try Task.checkCancellation()
+        } catch { try? FileManager.default.removeItem(at: outputURL); throw error }
 
         #if os(iOS)
         // 尝试自动保存一份到系统相册
-        try? await VideoExportManager.shared.saveToPhotoLibrary(videoURL: outputURL)
+        if saveToPhotos { try? await VideoExportManager.shared.saveToPhotoLibrary(videoURL: outputURL) }
         #endif
     }
 }

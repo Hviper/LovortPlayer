@@ -6,6 +6,12 @@ import Photos
 import AppKit
 #endif
 
+#if os(iOS)
+public typealias ExportSourceView = UIView
+#elseif os(macOS)
+public typealias ExportSourceView = NSView
+#endif
+
 public enum VideoExportError: LocalizedError {
     case photoAccessDenied
     case unsupportedFormat(String)
@@ -37,6 +43,8 @@ public final class VideoExportManager: NSObject {
 
     // MARK: - 1. 保存到系统相册 (Photos Library)
     public func saveToPhotoLibrary(videoURL: URL) async throws {
+        let readable = try await VaultManager.shared.readableURL(for: videoURL)
+        defer { VaultManager.shared.releaseReadableURL(readable) }
         #if os(iOS)
         // 检查相册写入权限
         let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
@@ -53,7 +61,7 @@ public final class VideoExportManager: NSObject {
 
         do {
             try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: videoURL)
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: readable)
             }
         } catch {
             let nsError = error as NSError
@@ -69,7 +77,23 @@ public final class VideoExportManager: NSObject {
     }
 
     // MARK: - 2. 系统分享 (Share Sheet: AirDrop / 微信 / 信息 / 更多)
-    public func shareVideo(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
+    public func shareVideo(url: URL, sourceView: ExportSourceView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
+        if url.path.contains("/.Vault/"), !VaultManager.shared.isUnlocked {
+            MediaLibraryManager.shared.showNotification(message: "请先解锁保险箱", isError: true)
+            completion?(); return
+        }
+        if url.pathExtension == "vault" {
+            Task { @MainActor in
+                do {
+                    let readable = try await VaultManager.shared.readableURL(for: url)
+                    self.shareVideo(url: readable, sourceView: sourceView, sourceRect: sourceRect) {
+                        VaultManager.shared.releaseReadableURL(readable)
+                        completion?()
+                    }
+                } catch { MediaLibraryManager.shared.showNotification(message: error.localizedDescription, isError: true); completion?() }
+            }
+            return
+        }
         #if os(iOS)
         guard let topVC = UIApplication.topViewController else { completion?(); return }
 
@@ -101,7 +125,23 @@ public final class VideoExportManager: NSObject {
     }
 
     // MARK: - 3. 存储到“文件” (Save to Files: iCloud Drive / 本地文件)
-    public func saveToFiles(url: URL, sourceView: UIView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
+    public func saveToFiles(url: URL, sourceView: ExportSourceView? = nil, sourceRect: CGRect? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
+        if url.path.contains("/.Vault/"), !VaultManager.shared.isUnlocked {
+            MediaLibraryManager.shared.showNotification(message: "请先解锁保险箱", isError: true)
+            completion?(); return
+        }
+        if url.pathExtension == "vault" {
+            Task { @MainActor in
+                do {
+                    let readable = try await VaultManager.shared.readableURL(for: url)
+                    self.saveToFiles(url: readable, sourceView: sourceView, sourceRect: sourceRect) {
+                        VaultManager.shared.releaseReadableURL(readable)
+                        completion?()
+                    }
+                } catch { MediaLibraryManager.shared.showNotification(message: error.localizedDescription, isError: true); completion?() }
+            }
+            return
+        }
         #if os(iOS)
         guard let topVC = UIApplication.topViewController else { completion?(); return }
 

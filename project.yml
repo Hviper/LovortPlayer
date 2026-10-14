@@ -1,6 +1,6 @@
-name: "LovortPlayer"
+name: LovortPlayer
 options:
-  bundleIdPrefix: "com.hviper"
+  bundleIdPrefix: com.hviper
   xcodeVersion: "15.0"
   deploymentTarget:
     iOS: "18.0"
@@ -14,15 +14,21 @@ packages:
   zipfoundation:
     url: https://github.com/weichsel/ZIPFoundation.git
     exactVersion: "0.9.20"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.1"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGNING_ALLOWED: "NO"
 targets:
-  LovortPlayer:
-    type: application
+  LovortPlayerCore:
+    type: framework
     platform: iOS
-    deploymentTarget: "18.0"
-    sources:
-      - path: App
-      - path: Core
-      - path: Views
+    sources: [Core]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hviper.lovortplayer.core
+        GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: whisperkit
         product: WhisperKit
@@ -30,11 +36,34 @@ targets:
         product: KSPlayer
       - package: zipfoundation
         product: ZIPFoundation
+  LovortPlayer:
+    type: application
+    platform: iOS
+    sources: [App, Views]
+    dependencies:
+      - target: LovortPlayerCore
+      - package: ksplayer
+        product: KSPlayer
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: "com.hviper.lovortplayer"
-        INFOPLIST_FILE: "App/Info.plist"
-        CODE_SIGN_STYLE: "Automatic"
-        DEVELOPMENT_TEAM: ""
+        PRODUCT_BUNDLE_IDENTIFIER: com.hviper.lovortplayer
+        INFOPLIST_FILE: App/Info.plist
         CODE_SIGNING_ALLOWED: "NO"
         ENABLE_BITCODE: "NO"
+  LovortPlayerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: LovortPlayerCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  LovortPlayer:
+    build:
+      targets:
+        LovortPlayer: all
+        LovortPlayerTests: [test]
+    test:
+      targets: [LovortPlayerTests]

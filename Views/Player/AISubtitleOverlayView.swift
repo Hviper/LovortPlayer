@@ -1,6 +1,10 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 
 public struct AISubtitleOverlayView: View {
+    @ObservedObject private var display = SubtitleDisplayPreferences.shared
     public let subtitle: SubtitleLine?
     public let videoSize: CGSize
     public let controlsHeight: CGFloat
@@ -19,8 +23,8 @@ public struct AISubtitleOverlayView: View {
                                   width: geometry.size.width + insets.leading + insets.trailing,
                                   height: geometry.size.height + insets.top + insets.bottom)
             let video = SubtitleLayout.videoFrame(size: videoSize, in: viewport)
-            let region = SubtitleLayout.playbackRegion(video: video, safeBounds: safeBounds, controlsHeight: controlsHeight)
-            let fontSize = SubtitleLayout.playbackFontSize(for: video.size)
+            let region = placement(video: video, safeBounds: safeBounds)
+            let fontSize = SubtitleLayout.playbackFontSize(for: video.size) * CGFloat(display.scale)
             if let sub = subtitle {
                 ViewThatFits(in: .vertical) {
                     caption(sub, fontSize: fontSize)
@@ -45,16 +49,23 @@ public struct AISubtitleOverlayView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: controlsHeight)
     }
+    private func placement(video: CGRect, safeBounds: CGRect) -> CGRect {
+        var region = SubtitleLayout.playbackRegion(video: video, safeBounds: safeBounds, controlsHeight: controlsHeight)
+        let lower = max(video.minY, safeBounds.minY) + 4
+        let upper = min(video.maxY - 4, safeBounds.maxY - controlsHeight - 12) - region.height
+        region.origin.y = max(lower, min(upper, region.origin.y - CGFloat(display.verticalOffset) * video.height))
+        return region
+    }
     private func caption(_ sub: SubtitleLine, fontSize: CGFloat) -> some View {
         VStack(spacing: 4) {
-            if let trans = sub.translatedText, !trans.isEmpty {
+            if display.textMode != .original, let trans = sub.translatedText, !trans.isEmpty {
                 Text(trans)
                     .font(.system(size: fontSize, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
             }
-            if !sub.originalText.isEmpty, sub.originalText != sub.translatedText {
+            if !sub.originalText.isEmpty, (display.textMode == .original || (display.textMode == .bilingual && sub.originalText != sub.translatedText) || (sub.translatedText?.isEmpty ?? true)) {
                 Text(sub.originalText)
-                    .font(.system(size: (sub.translatedText?.isEmpty ?? true) ? fontSize : fontSize * 0.76, weight: .medium, design: .rounded))
+                    .font(.system(size: (display.textMode == .original || (sub.translatedText?.isEmpty ?? true)) ? fontSize : fontSize * 0.76, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.9))
             }
         }

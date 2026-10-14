@@ -57,7 +57,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         let engineValue = UserDefaults.standard.string(forKey: engineStorageKey) ?? ""
         currentEngine = AISubtitleEngineType(rawValue: engineValue) ?? .localWhisperKit
         let modelValue = UserDefaults.standard.string(forKey: modelStorageKey) ?? ""
-        offlineModel = OfflineWhisperModel(rawValue: modelValue) ?? .highAccuracy
+        offlineModel = OfflineWhisperModel(rawValue: modelValue) ?? .balanced
         let providerValue = UserDefaults.standard.string(forKey: translationProviderStorageKey) ?? ""
         translationProvider = SubtitleTranslationProviderType(rawValue: providerValue) ?? .apple
         isGPTEnhancementEnabled = UserDefaults.standard.bool(forKey: gptEnhancementStorageKey)
@@ -174,6 +174,12 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         return nil
     }
 
+    private static func persist(_ document: SubtitleDocument, for url: URL, store: SubtitleCacheStore, permit: SubtitleRunPermit?) throws -> URL {
+        if let permit { return try permit.perform { try store.save(document, for: url) } }
+        try Task.checkCancellation()
+        return try store.save(document, for: url)
+    }
+
     public func processVideo(
         videoURL: URL,
         targetLanguage: String = "中文 (简体)",
@@ -186,8 +192,12 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         forceRegenerate: Bool = false,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onTranscriptionProgress: (@Sendable (_ completedChunks: Int, _ totalChunks: Int) async -> Void)? = nil,
-        onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil
+        onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil,
+        onEvent: (@Sendable (SubtitleProgressEvent) -> Void)? = nil,
+        cachePermit: SubtitleRunPermit? = nil
     ) async throws -> [SubtitleLine] {
+        let privateVideo = videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")
+        if privateVideo, !(await VaultManager.shared.isUnlocked) { throw NSError(domain: "Subtitle", code: 1, userInfo: [NSLocalizedDescriptionKey: "请先解锁保险箱"]) }
         let selectedEngine = engine ?? currentEngine
         let selectedModel = model ?? offlineModel
         let selectedTranslationProvider = effectiveTranslationProvider(translationProvider ?? self.translationProvider)
@@ -270,6 +280,21 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             translationService = .failure(error)
         }
         let originalLines: [SubtitleLine]
+        let readable = try await VaultManager.shared.readableURL(for: videoURL)
+        defer { Task { @MainActor in VaultManager.shared.releaseReadableURL(readable) } }
+        let pipeline: ProgressiveTranslationPipeline?
+        if case .success(let service) = translationService {
+            pipeline = ProgressiveTranslationPipeline(service: service, source: sourceLanguage, target: targetLanguage, progress: onEvent) { [cacheStore] lines, completed, total in
+                let document = SubtitleDocument(sourceLanguage: sourceLanguage.rawValue, targetLanguage: targetLanguage,
+                    engine: selectedEngine, model: expectedModel, translationProvider: selectedTranslationProvider,
+                    translationConfiguration: translationSettings.cacheIdentity, isComplete: total > 0 && completed.count == total,
+                    translationComplete: false, gptEnhanced: false, completedChunkIndexes: completed,
+                    chunkDuration: LocalWhisperSubtitleService.chunkDuration, videoURL: videoURL, lines: lines)
+                _ = try? Self.persist(document, for: videoURL, store: cacheStore, permit: cachePermit)
+                await onPartialResult?(lines)
+            }
+        } else { pipeline = nil }
+        do {
         if let reusableOriginalLines {
             originalLines = reusableOriginalLines
             onProgress?("已复用上次离线转写结果，正在重试翻译...")
@@ -277,15 +302,17 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             switch selectedEngine {
             case .localWhisperKit:
                 originalLines = try await localService.transcribeProgressively(
-                    audioURL: videoURL,
+                    audioURL: readable,
                     sourceLanguage: sourceLanguage,
                     model: selectedModel,
                     preferredStartTime: preferredStartTime,
                     existingLines: initialLines,
                     completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
                     onProgress: onProgress,
+                    onEvent: onEvent,
                     onPartialResult: { [cacheStore] update in
                         await onTranscriptionProgress?(update.completedChunkIndexes.count, update.totalChunkCount)
+                        if let pipeline { return await pipeline.submit(update.lines, completed: update.completedChunkIndexes, total: update.totalChunkCount) }
                         if !update.lines.isEmpty {
                             await onPartialResult?(update.lines)
                         }
@@ -305,7 +332,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             videoURL: videoURL,
                             lines: update.lines
                         )
-                        _ = try? cacheStore.save(partialDocument, for: videoURL)
+                        _ = try? Self.persist(partialDocument, for: videoURL, store: cacheStore, permit: cachePermit)
                         return update.lines
                     }
                 )
@@ -322,14 +349,20 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                     .appendingPathComponent("lovort-audio-\(UUID().uuidString).m4a")
                 defer { try? FileManager.default.removeItem(at: tempAudioURL) }
                 try await extractAudioTrack(
-                    from: videoURL,
+                    from: readable,
                     outputAudioURL: tempAudioURL,
                     sourceLanguage: sourceLanguage
                 )
+                onEvent?(.phase(.transcribing))
                 originalLines = try await CloudAISubtitleService(apiKey: platformKey).transcribe(
                     audioURL: tempAudioURL,
                     sourceLanguage: sourceLanguage,
-                    onProgress: onProgress
+                    onProgress: onProgress,
+                    onPartialResult: { lines, completed, total in
+                        await onTranscriptionProgress?(completed, total)
+                        if let pipeline { _ = await pipeline.submit(lines, completed: Array(0..<completed), total: total) }
+                        else { await onPartialResult?(lines) }
+                    }
                 )
             case .cloudAntigravity:
                 throw NSError(
@@ -349,44 +382,23 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }
         try Task.checkCancellation()
 
-        let originalDocument = SubtitleDocument(
-            sourceLanguage: sourceLanguage.rawValue,
-            targetLanguage: targetLanguage,
-            engine: selectedEngine,
-            model: expectedModel,
-            translationProvider: selectedTranslationProvider,
-            translationConfiguration: translationSettings.cacheIdentity,
-            isComplete: true,
-            translationComplete: false,
-            gptEnhanced: false,
-            videoURL: videoURL,
-            lines: originalLines
-        )
-        _ = try cacheStore.save(originalDocument, for: videoURL)
-        saveSRTBestEffort(lines: originalLines, videoURL: videoURL, suffix: "source")
-
-        await onPartialResult?(originalLines)
         var finalLines = originalLines
         var translationWarning: String?
         var translationComplete = false
         var gptEnhanced = false
         do {
-            let service = try translationService.get()
-            let untranslatedLines = finalLines.filter { ($0.translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            if !untranslatedLines.isEmpty {
-                let translated = try await service.translate(
-                    lines: untranslatedLines,
-                    sourceLanguage: sourceLanguage,
-                    targetLanguage: targetLanguage,
-                    onProgress: onProgress
-                )
-                let translatedByID = Dictionary(uniqueKeysWithValues: translated.map { ($0.id, $0) })
-                finalLines = finalLines.map { translatedByID[$0.id] ?? $0 }
+            if let pipeline {
+                _ = await pipeline.submit(originalLines, completed: [0], total: 1)
+                let result = await withTaskCancellationHandler { await pipeline.finish() } onCancel: { Task { await pipeline.cancelAndDrain() } }
+                try Task.checkCancellation()
+                finalLines = result.lines
+                translationWarning = result.warning.map { "翻译未完成：\($0)；已保留原文与成功译文" }
+                translationComplete = finalLines.allSatisfy { !($0.translatedText ?? "").isEmpty }
+            } else {
+                _ = try translationService.get()
             }
-            translationComplete = true
-            gptEnhanced = selectedTranslationProvider == .openAI
-
-            if shouldEnhanceWithGPT, selectedTranslationProvider != .openAI {
+            gptEnhanced = selectedTranslationProvider == .openAI && translationComplete
+            if shouldEnhanceWithGPT, selectedTranslationProvider != .openAI, translationComplete {
                 guard platformKey.hasPrefix("sk-") else {
                     throw NSError(
                         domain: "AISubtitleError",
@@ -404,7 +416,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            translationWarning = "翻译未完成：\(error.localizedDescription)；已保留原文字幕"
+            translationWarning = "翻译未完成：\(error.localizedDescription)；已保留原文与成功译文"
         }
 
         try Task.checkCancellation()
@@ -421,21 +433,21 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             videoURL: videoURL,
             lines: finalLines
         )
-        _ = try cacheStore.save(document, for: videoURL)
+        _ = try Self.persist(document, for: videoURL, store: cacheStore, permit: cachePermit)
         try Task.checkCancellation()
-        saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: "bilingual")
-        saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: nil)
-        if translationComplete {
-            let translatedOnly = finalLines.map { line in
-                SubtitleLine(
-                    id: line.id,
-                    startTime: line.startTime,
-                    endTime: line.endTime,
-                    originalText: line.translatedText ?? line.originalText
-                )
+        let saveSidecars = {
+            self.saveSRTBestEffort(lines: originalLines, videoURL: videoURL, suffix: "source")
+            self.saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: "bilingual")
+            self.saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: nil)
+            if translationComplete {
+                let translatedOnly = finalLines.map { line in
+                    SubtitleLine(id: line.id, startTime: line.startTime, endTime: line.endTime,
+                                 originalText: line.translatedText ?? line.originalText)
+                }
+                self.saveSRTBestEffort(lines: translatedOnly, videoURL: videoURL, suffix: "zh-Hans")
             }
-            saveSRTBestEffort(lines: translatedOnly, videoURL: videoURL, suffix: "zh-Hans")
         }
+        if let cachePermit { try cachePermit.perform(saveSidecars) } else { try Task.checkCancellation(); saveSidecars() }
 
         if let translationWarning {
             onProgress?("⚠️ \(translationWarning)")
@@ -443,6 +455,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             onProgress?("✅ 已生成并保存双语字幕（共 \(finalLines.count) 句）")
         }
         return finalLines
+        } catch {
+            if let pipeline { await pipeline.cancelAndDrain() }
+            throw error
+        }
     }
 
     /// Tries a short passage without creating a long-running task or writing subtitle cache.
@@ -456,6 +472,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         onProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SubtitlePreviewResult {
         let startedAt = Date()
+        let readable = try await VaultManager.shared.readableURL(for: videoURL)
+        defer { Task { @MainActor in VaultManager.shared.releaseReadableURL(readable) } }
         guard await OfflineWhisperModelManager.shared.installedFolder(for: model) != nil else {
             throw NSError(domain: "SubtitlePreview", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "请先在设置中安装所选离线模型"])
@@ -466,7 +484,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                           userInfo: [NSLocalizedDescriptionKey: "请等待当前字幕任务结束后再试预览"])
         }
 
-        let asset = AVURLAsset(url: videoURL)
+        let asset = AVURLAsset(url: readable)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else {
             throw NSError(domain: "SubtitlePreview", code: -3,
@@ -651,6 +669,9 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     }
 
     private func saveSRTBestEffort(lines: [SubtitleLine], videoURL: URL, suffix: String?) {
+        // Private transcripts stay in protected Application Support, outside file sharing.
+        if videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/") { return }
+
         let content = SRTParser.generateSRT(from: lines)
         let base = videoURL.deletingPathExtension()
         let sidecarURL = suffix.map { base.appendingPathExtension("\($0).srt") }

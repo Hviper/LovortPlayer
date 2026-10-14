@@ -1,3 +1,6 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 import AVFoundation
 
@@ -147,19 +150,19 @@ public struct VideoCardView: View {
                         Button {
                             VideoExportManager.shared.shareVideo(url: video.fileURL)
                         } label: {
-                            Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+                            Label("分享原视频", systemImage: "square.and.arrow.up")
                         }
 
                         Button {
                             saveToPhotoLibrary()
                         } label: {
-                            Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+                            Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
                         }
 
                         Button {
                             VideoExportManager.shared.saveToFiles(url: video.fileURL)
                         } label: {
-                            Label("存储到“文件”", systemImage: "folder.badge.plus")
+                            Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
                         }
 
                         Divider()
@@ -206,19 +209,19 @@ public struct VideoCardView: View {
             Button {
                 VideoExportManager.shared.shareVideo(url: video.fileURL)
             } label: {
-                Label("系统分享 (AirDrop/微信)", systemImage: "square.and.arrow.up")
+                Label("分享原视频", systemImage: "square.and.arrow.up")
             }
 
             Button {
                 saveToPhotoLibrary()
             } label: {
-                Label("保存到系统相册", systemImage: "photo.badge.arrow.down")
+                Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
             }
 
             Button {
                 VideoExportManager.shared.saveToFiles(url: video.fileURL)
             } label: {
-                Label("存储到“文件”", systemImage: "folder.badge.plus")
+                Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
             }
 
             Divider()
@@ -281,7 +284,9 @@ public struct VideoCardView: View {
     }
 
     private func enqueueDefaultSubtitleTask() {
-        subtitleTasks.enqueue(videoURL: video.fileURL, videoTitle: video.title, isPrivate: video.isHidden)
+        let language = SubtitleSourceLanguage(rawValue: UserDefaults.standard.string(forKey: "subtitle.language.\(video.id)") ?? "") ?? .automatic
+        let target = UserDefaults.standard.string(forKey: "subtitle.targetLanguage") ?? "中文 (简体)"
+        subtitleTasks.enqueue(videoURL: video.fileURL, videoTitle: video.title, sourceLanguage: language, targetLanguage: target, isPrivate: video.isHidden)
     }
 
     private func subtitleBadge(_ task: SubtitleTaskItem) -> some View {
@@ -310,20 +315,8 @@ public struct VideoCardView: View {
 
     private func generateThumbnail() async {
         guard thumbnail == nil else { return }
-        let fileURL = video.fileURL
-        let asset = AVURLAsset(url: fileURL)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 480, height: 270)
-        let targetSec = video.lastPlayedPosition > 1 ? video.lastPlayedPosition : min(1.0, max(0, video.duration / 2))
-        let time = CMTime(seconds: targetSec, preferredTimescale: 600)
-
-        var resolvedCGImage: CGImage? = try? await generator.image(at: time).image
-        if resolvedCGImage == nil {
-            resolvedCGImage = await Task.detached(priority: .utility) {
-                AV1SoftwareDecoderEngine.extractThumbnail(from: fileURL, at: targetSec)
-            }.value
-        }
+        let resolvedCGImage = await ThumbnailStore.shared.image(for: video)
+        guard !Task.isCancelled else { return }
 
         if let cgImage = resolvedCGImage {
             #if os(iOS)

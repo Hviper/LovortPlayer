@@ -17,7 +17,8 @@ public final class CloudAISubtitleService: @unchecked Sendable {
     public func transcribe(
         audioURL: URL,
         sourceLanguage: SubtitleSourceLanguage,
-        onProgress: (@Sendable (String) -> Void)? = nil
+        onProgress: (@Sendable (String) -> Void)? = nil,
+        onPartialResult: (@Sendable ([SubtitleLine], Int, Int) async -> Void)? = nil
     ) async throws -> [SubtitleLine] {
         guard apiKey.hasPrefix("sk-") else {
             throw serviceError("云端语音转写需要 OpenAI Platform API Key；ChatGPT 订阅令牌不能调用音频接口")
@@ -31,10 +32,12 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         let fileSize = (try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         if fileSize > 0, fileSize <= maximumUploadBytes {
             onProgress?("正在使用 OpenAI Whisper 转写音频...")
-            return try await requestWhisperTranscription(
+            let result = try await requestWhisperTranscription(
                 audioURL: audioURL,
                 language: sourceLanguage.whisperCode
             )
+            await onPartialResult?(result, 1, 1)
+            return result
         }
 
         var allLines: [SubtitleLine] = []
@@ -62,6 +65,7 @@ public final class CloudAISubtitleService: @unchecked Sendable {
                     translatedText: line.translatedText
                 )
             })
+            await onPartialResult?(allLines, index + 1, totalSlices)
         }
         return allLines
     }

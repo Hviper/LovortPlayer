@@ -22,7 +22,18 @@ public final class PlayerViewModel: ObservableObject {
     @Published public private(set) var isCompatibilityMode: Bool = false
     public private(set) var compatibilityCoordinator: KSVideoPlayer.Coordinator?
     public private(set) var compatibilityOptions: KSOptions?
+    private var playbackDriver: (any PlaybackDriving)?
+    public var playbackMediaURL: URL? { resolvedVideoURL ?? currentVideoURL }
     private var pendingCompatibilityStart: TimeInterval = 0
+    private var playbackSession = UUID()
+    private var loadTask: Task<Void, Never>?
+    private var durationTask: Task<Void, Never>?
+    private var firstFrameTask: Task<Void, Never>?
+    private var audioTask: Task<Void, Never>?
+    private var clipTask: Task<Void, Never>?
+    private var seekFrameTask: Task<Void, Never>?
+    private var resolvedVideoURL: URL?
+    private var subtitleIndex = 0
 
     // AV1 (libdav1d) 软解渲染状态
     @Published public var isAV1SoftwareMode: Bool = false
@@ -84,6 +95,7 @@ public final class PlayerViewModel: ObservableObject {
         subtitles = []
         currentSubtitle = nil
         isAISubtitleEnabled = false
+        subtitleIndex = 0
         self.currentVideoURL = url
         self.currentVideoIsPrivate = isPrivate
         resetControlsTimeout()
@@ -112,13 +124,32 @@ public final class PlayerViewModel: ObservableObject {
         // 尝试自动载入字幕
         if let srt = AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: url) {
             self.subtitles = srt
-            self.isAISubtitleEnabled = true
+            self.isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
         }
         syncGlobalSubtitleTask()
 
         // 读取历史播放进度
         let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
 
+        let session = playbackSession
+        if isPrivate {
+            loadTask = Task {
+                do {
+                    let readable = try await VaultManager.shared.readableURL(for: url)
+                    guard !Task.isCancelled, session == playbackSession else { VaultManager.shared.releaseReadableURL(readable); return }
+                    resolvedVideoURL = readable
+                    let shouldPlay = isPlaying
+                    configureMedia(url: readable, savedPosition: savedPosition, session: session)
+                    if shouldPlay { isPlaying = false; togglePlayPause() }
+                } catch { if session == playbackSession { playbackErrorMessage = error.localizedDescription } }
+            }
+        } else {
+            resolvedVideoURL = url
+            configureMedia(url: url, savedPosition: savedPosition, session: session)
+        }
+    }
+
+    private func configureMedia(url: URL, savedPosition: Double, session: UUID) {
         if Self.requiresCompatibilityPlayer(url) {
             configureCompatibilityPlayer(url: url, savedPosition: savedPosition)
             return
@@ -136,16 +167,14 @@ public final class PlayerViewModel: ObservableObject {
             self.currentTime = startPos
 
             // 立即解码首帧画面
-            Task.detached(priority: .userInteractive) {
-                if let firstFrame = engine.decodeFrame(at: startPos) {
-                    await MainActor.run {
-                        self.currentSoftwareFrame = firstFrame
-                    }
-                }
+            firstFrameTask = Task {
+                let frame = await Task.detached(priority: .userInteractive) { engine.decodeFrame(at: startPos) }.value
+                guard !Task.isCancelled, session == playbackSession else { return }
+                currentSoftwareFrame = frame
             }
 
             // 异步构建仅包含 AAC 音轨的 AVMutableComposition 交给 AVPlayer 播放声音
-            Task {
+            audioTask = Task {
                 let asset = AVURLAsset(url: url)
                 if let audioTracks = try? await asset.loadTracks(withMediaType: .audio), !audioTracks.isEmpty {
                     let composition = AVMutableComposition()
@@ -155,11 +184,13 @@ public final class PlayerViewModel: ObservableObject {
                             try? compTrack.insertTimeRange(timeRange, of: track, at: .zero)
                         }
                     }
+                    guard !Task.isCancelled, session == playbackSession else { return }
                     let audioItem = AVPlayerItem(asset: composition)
                     let p = AVPlayer(playerItem: audioItem)
                     p.volume = self.volume
                     p.isMuted = false
                     self.player = p
+                    self.playbackDriver = NativePlaybackDriver(p)
                     if startPos > 0 {
                         let cmTime = CMTime(seconds: startPos, preferredTimescale: 600)
                         await p.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -182,10 +213,12 @@ public final class PlayerViewModel: ObservableObject {
         nativePlayer.volume = self.volume
         nativePlayer.isMuted = false
         self.player = nativePlayer
+        self.playbackDriver = NativePlaybackDriver(nativePlayer)
         setupTimeObserver()
 
-        Task {
+        durationTask = Task {
             if let durationCM = try? await playerItem.asset.load(.duration) {
+                guard !Task.isCancelled, session == playbackSession else { return }
                 let seconds = CMTimeGetSeconds(durationCM)
                 if seconds.isFinite && !seconds.isNaN {
                     self.duration = seconds
@@ -206,17 +239,19 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     private func configureCompatibilityPlayer(url: URL, savedPosition: TimeInterval) {
+        let session = playbackSession
         let options = KSOptions()
         options.hardwareDecode = true
         let coordinator = KSVideoPlayer.Coordinator()
         pendingCompatibilityStart = savedPosition
         compatibilityOptions = options
         compatibilityCoordinator = coordinator
+        playbackDriver = CompatiblePlaybackDriver(coordinator)
         isCompatibilityMode = true
 
         coordinator.onStateChanged = { [weak self, weak coordinator] layer, state in
             Task { @MainActor [weak self, weak coordinator] in
-                guard let self, let coordinator else { return }
+                guard let self, let coordinator, session == self.playbackSession, self.compatibilityCoordinator === coordinator else { return }
                 self.isBuffering = state == .preparing || state == .buffering
                 self.isPlaying = state.isPlaying
                 if state == .readyToPlay {
@@ -235,7 +270,7 @@ public final class PlayerViewModel: ObservableObject {
         }
         coordinator.onPlay = { [weak self] current, total in
             Task { @MainActor [weak self] in
-                guard let self, !self.isScrubbing else { return }
+                guard let self, !self.isScrubbing, session == self.playbackSession else { return }
                 if current.isFinite { self.currentTime = current }
                 if total.isFinite, total > 0 { self.duration = total }
                 self.updateActiveSubtitle(at: current)
@@ -244,7 +279,7 @@ public final class PlayerViewModel: ObservableObject {
         }
         coordinator.onFinish = { [weak self] _, error in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, session == self.playbackSession else { return }
                 self.isPlaying = false
                 self.isBuffering = false
                 if let error { self.playbackErrorMessage = "视频解码失败：\(error.localizedDescription)" }
@@ -301,62 +336,32 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func togglePlayPause() {
-        if isCompatibilityMode {
-            if isPlaying {
-                compatibilityCoordinator?.playerLayer?.pause()
-                isPlaying = false
-            } else {
-                compatibilityCoordinator?.playerLayer?.play()
-                compatibilityCoordinator?.playbackRate = playbackRate
-                isPlaying = true
-                resetControlsTimeout()
-            }
-            return
-        }
-        if isPlaying {
-            player?.pause()
-            isPlaying = false
-        } else {
+        if isPlaying { playbackDriver?.pause(); isPlaying = false }
+        else {
             #if os(iOS)
             try? AVAudioSession.sharedInstance().setActive(true)
             #endif
-            player?.volume = volume
-            player?.isMuted = false
-            player?.play()
-            player?.rate = playbackRate
+            playbackDriver?.play(rate: playbackRate, volume: volume)
             isPlaying = true
             resetControlsTimeout()
         }
     }
 
-    public func pause() {
-        compatibilityCoordinator?.playerLayer?.pause()
-        player?.pause()
-        isPlaying = false
-    }
+    public func pause() { playbackDriver?.pause(); isPlaying = false }
 
     public func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration))
-        if isCompatibilityMode {
-            compatibilityCoordinator?.seek(time: clamped)
-            currentTime = clamped
-            updateActiveSubtitle(at: clamped)
-            saveCurrentProgress()
-            return
-        }
-        let cmTime = CMTime(seconds: clamped, preferredTimescale: 600)
-        player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        playbackDriver?.seek(to: clamped)
         currentTime = clamped
         updateActiveSubtitle(at: clamped)
         saveCurrentProgress()
-
         if isAV1SoftwareMode, let engine = av1Engine {
-            Task.detached(priority: .userInteractive) {
-                if let frame = engine.decodeFrame(at: clamped) {
-                    await MainActor.run {
-                        self.currentSoftwareFrame = frame
-                    }
-                }
+            seekFrameTask?.cancel()
+            let session = playbackSession
+            seekFrameTask = Task {
+                let frame = await Task.detached(priority: .userInteractive) { engine.decodeFrame(at: clamped) }.value
+                guard !Task.isCancelled, session == playbackSession else { return }
+                currentSoftwareFrame = frame
             }
         }
     }
@@ -373,10 +378,7 @@ public final class PlayerViewModel: ObservableObject {
 
     public func setPlaybackRate(_ rate: Float) {
         self.playbackRate = rate
-        compatibilityCoordinator?.playbackRate = rate
-        if isPlaying {
-            player?.rate = rate
-        }
+        if isPlaying { playbackDriver?.play(rate: rate, volume: volume) }
     }
 
     public func triggerControlsDisplay() {
@@ -389,6 +391,12 @@ public final class PlayerViewModel: ObservableObject {
         if showControls {
             resetControlsTimeout()
         }
+    }
+
+    public func setSubtitleDisplayEnabled(_ enabled: Bool) {
+        SubtitleDisplayPreferences.shared.enabled = enabled
+        isAISubtitleEnabled = enabled
+        updateActiveSubtitle(at: currentTime)
     }
 
     public func generateAISubtitles(
@@ -424,11 +432,18 @@ public final class PlayerViewModel: ObservableObject {
         } else {
             isGeneratingSubtitles = false
         }
-        if let lines = SubtitleTaskManager.shared.subtitles(for: url), !lines.isEmpty {
+        if let lines = SubtitleTaskManager.shared.subtitles(for: url), !lines.isEmpty, lines != subtitles {
             subtitles = lines
-            isAISubtitleEnabled = true
+            isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
             updateActiveSubtitle(at: currentTime)
         }
+    }
+
+    private static var privateClipRoot: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("VaultClipStaging", isDirectory: true)
+    }
+    public static func removeAbandonedPrivateClips() {
+        try? FileManager.default.removeItem(at: privateClipRoot)
     }
 
     public func exportClip() {
@@ -436,22 +451,37 @@ public final class PlayerViewModel: ObservableObject {
         let startTime = CMTime(seconds: clipStartTime, preferredTimescale: 600)
         let endTime = CMTime(seconds: clipEndTime, preferredTimescale: 600)
 
-        let clipsDir = MediaLibraryManager.shared.clipsDirectory
-        let clipName = "Clip_\(Int(Date().timeIntervalSince1970)).mp4"
+        let privateClip = currentVideoIsPrivate
+        let clipsDir = privateClip ? Self.privateClipRoot.appendingPathComponent(UUID().uuidString, isDirectory: true) : MediaLibraryManager.shared.clipsDirectory
+        let clipName = "Clip_\(UUID().uuidString).mp4"
         let outputURL = clipsDir.appendingPathComponent(clipName)
 
         isExportingClip = true
         exportMessage = "正在无损导出..."
 
-        Task {
+        clipTask = Task {
+            defer { if privateClip { try? FileManager.default.removeItem(at: clipsDir) } }
             do {
+                if privateClip {
+                    try FileManager.default.createDirectory(at: clipsDir, withIntermediateDirectories: true)
+                    #if os(iOS)
+                    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: clipsDir.path)
+                    #endif
+                }
+                let readable = try await VaultManager.shared.readableURL(for: url)
+                defer { VaultManager.shared.releaseReadableURL(readable); if privateClip { try? FileManager.default.removeItem(at: outputURL) } }
                 try await LosslessClipManager.shared.exportLosslessClip(
-                    assetURL: url,
+                    assetURL: readable,
                     outputURL: outputURL,
                     startTime: startTime,
-                    endTime: endTime
+                    endTime: endTime,
+                    saveToPhotos: !privateClip
                 )
-                self.exportMessage = "导出成功！已存入剪辑库及相册"
+                if privateClip {
+                    let encrypted = SafeFileImport.availableURL(name: clipName + ".vault", in: MediaLibraryManager.shared.vaultDirectory)
+                    try await VaultManager.shared.encryptFile(at: outputURL, destinationURL: encrypted)
+                }
+                self.exportMessage = privateClip ? "已加密保存到私密文件夹" : "导出成功！已存入剪辑库"
                 MediaLibraryManager.shared.reloadLibrary()
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 self.isClipMode = false
@@ -488,9 +518,10 @@ public final class PlayerViewModel: ObservableObject {
 
     private func setupTimeObserver() {
         let interval = CMTime(seconds: 0.3, preferredTimescale: 600)
+        let session = playbackSession
         timeObserverToken = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             Task { @MainActor [weak self] in
-                guard let self = self, !self.isScrubbing else { return }
+                guard let self = self, !self.isScrubbing, session == self.playbackSession else { return }
                 let current = CMTimeGetSeconds(time)
                 self.currentTime = current
                 self.updateActiveSubtitle(at: current)
@@ -505,17 +536,34 @@ public final class PlayerViewModel: ObservableObject {
             currentSubtitle = nil
             return
         }
-        currentSubtitle = subtitles.first { time >= $0.startTime && time <= $0.endTime }
+        let adjusted = time + SubtitleDisplayPreferences.shared.offset(for: currentVideoURL)
+        guard !subtitles.isEmpty else { currentSubtitle = nil; return }
+        if subtitleIndex >= subtitles.count { subtitleIndex = 0 }
+        if adjusted < subtitles[subtitleIndex].startTime || adjusted > subtitles[subtitleIndex].endTime {
+            var low = 0, high = subtitles.count
+            while low < high { let mid = (low + high) / 2; if subtitles[mid].startTime <= adjusted { low = mid + 1 } else { high = mid } }
+            subtitleIndex = max(0, low - 1)
+        }
+        let line = subtitles[subtitleIndex]
+        let next = adjusted >= line.startTime && adjusted < line.endTime ? line : nil
+        if next != currentSubtitle { currentSubtitle = next }
     }
 
     public func cleanup() {
         cleanupPlaybackEngines(saveProgress: true)
-        MediaLibraryManager.shared.reloadLibrary()
+        PlaybackHistoryManager.shared.flush()
+        MediaIdentityStore.shared.flush()
+        MediaLibraryManager.shared.refreshPlaybackPositions()
         controlsHideTimer?.cancel()
     }
 
     private func cleanupPlaybackEngines(saveProgress: Bool) {
-        if saveProgress { saveCurrentProgress() }
+        if saveProgress { saveCurrentProgress(); PlaybackHistoryManager.shared.flush() }
+        if currentVideoIsPrivate { clipTask?.cancel() }
+        playbackSession = UUID()
+        loadTask?.cancel(); durationTask?.cancel(); firstFrameTask?.cancel(); audioTask?.cancel(); seekFrameTask?.cancel()
+        if let resolvedVideoURL { VaultManager.shared.releaseReadableURL(resolvedVideoURL) }
+        resolvedVideoURL = nil
         // 停止 AV1 软解线程并释放解码器上下文
         av1RenderTask?.cancel()
         av1RenderTask = nil
@@ -532,7 +580,11 @@ public final class PlayerViewModel: ObservableObject {
         }
         oldPlayer?.replaceCurrentItem(with: nil)
         player = nil
+        playbackDriver = nil
         isPlaying = false
+        compatibilityCoordinator?.onStateChanged = nil
+        compatibilityCoordinator?.onPlay = nil
+        compatibilityCoordinator?.onFinish = nil
         compatibilityCoordinator?.playerLayer?.stop()
         compatibilityCoordinator?.resetPlayer()
         compatibilityCoordinator = nil

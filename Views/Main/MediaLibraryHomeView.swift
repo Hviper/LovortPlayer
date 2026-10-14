@@ -1,3 +1,6 @@
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 import SwiftUI
 import UniformTypeIdentifiers
 import Translation
@@ -9,6 +12,15 @@ import PhotosUI
 public struct MediaLibraryHomeView: View {
     @StateObject private var libraryManager = MediaLibraryManager.shared
     @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var vault = VaultManager.shared
+    @State private var showVaultSetup = false
+    @State private var pendingVaultMove: VideoItem?
+    @State private var pendingDelete: VideoItem?
+    @State private var isExtractingPhotos = false
+    @State private var importIntoVault = false
+    @State private var searchText = ""
+    @AppStorage("library.sort") private var sortOrder = "newest"
     @State private var selectedVideo: VideoItem?
     @State private var showLANUpload: Bool = false
     @State private var showVaultUnlocked: Bool = false
@@ -31,22 +43,28 @@ public struct MediaLibraryHomeView: View {
     public init() {}
 
     private var filteredVideos: [VideoItem] {
-        if isDecoySpace {
-            // 诱导假密码模式：反侦察，显示空的假空间
-            return []
+        if isDecoySpace { return [] }
+        var items = libraryManager.videos.filter { video in
+            switch filterTab {
+            case 1: return video.fileURL.path.contains("/Clips/") && !video.isHidden
+            case 2: return vault.isUnlocked && video.isHidden
+            default: return !video.isHidden
+            }
         }
+        if !searchText.isEmpty { items = items.filter { $0.title.localizedCaseInsensitiveContains(searchText) } }
+        items.sort { lhs, rhs in
+            switch sortOrder {
+            case "name": return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            case "recent": return PlaybackHistoryManager.shared.lastPlayedDate(for: lhs.fileURL) > PlaybackHistoryManager.shared.lastPlayedDate(for: rhs.fileURL)
+            default: return lhs.createdAt > rhs.createdAt
+            }
+        }
+        return items
+    }
 
-        switch filterTab {
-        case 1:
-            // 精彩剪辑（严格排除私密文件夹内容）
-            return libraryManager.videos.filter { $0.fileURL.path.contains("/Clips/") && !$0.isHidden }
-        case 2:
-            // 私密文件夹（仅在私密文件夹 Tab 中展示隐藏视频）
-            return libraryManager.videos.filter { $0.isHidden }
-        default:
-            // 全部（永远只展示公开视频，严格过滤私密文件夹的内容）
-            return libraryManager.videos.filter { !$0.isHidden }
-        }
+    private var continueWatching: [VideoItem] {
+        guard filterTab == 0, searchText.isEmpty else { return [] }
+        return Array(filteredVideos.filter { $0.lastPlayedPosition > 2 }.sorted { PlaybackHistoryManager.shared.lastPlayedDate(for: $0.fileURL) > PlaybackHistoryManager.shared.lastPlayedDate(for: $1.fileURL) }.prefix(3))
     }
 
     public var body: some View {
@@ -109,6 +127,13 @@ public struct MediaLibraryHomeView: View {
                     } else {
                         ScrollView {
                             LazyVStack(spacing: 16) {
+                                if !continueWatching.isEmpty {
+                                    Text("继续观看").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                    ForEach(continueWatching) { video in
+                                        VideoCardView(video: video, onSelect: { selectedVideo = video })
+                                    }
+                                    Text("全部视频").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                }
                                 ForEach(filteredVideos) { video in
                                     VideoCardView(
                                         video: video,
@@ -117,11 +142,13 @@ public struct MediaLibraryHomeView: View {
                                         },
                                         onToggleHide: {
                                             Task {
-                                                try? await libraryManager.toggleHideVideo(video)
+                                                if !vault.hasPassword { pendingVaultMove = video; showVaultSetup = true; return }
+                                                do { try await libraryManager.toggleHideVideo(video) }
+                                                catch { libraryManager.showNotification(message: error.localizedDescription, isError: true) }
                                             }
                                         },
                                         onDelete: {
-                                            libraryManager.deleteVideo(video)
+                                            pendingDelete = video
                                         }
                                     )
                                 }
@@ -192,17 +219,21 @@ public struct MediaLibraryHomeView: View {
             .onChange(of: selectedPhotoItems) { newItems in
                 guard !newItems.isEmpty else { return }
                 let itemsToImport = newItems
+                let selectionIsPrivate = importIntoVault
                 selectedPhotoItems.removeAll()
                 Task {
+                    guard !isExtractingPhotos, !libraryManager.isImporting else { return }
+                    isExtractingPhotos = true
                     var urlsToImport: [URL] = []
-                    libraryManager.isImporting = true
-                    libraryManager.importStatusText = "正在从系统相册提取视频，请稍候..."
-                    for item in itemsToImport {
-                        if let movie = try? await item.loadTransferable(type: VideoTransferable.self) {
-                            urlsToImport.append(movie.url)
-                        }
+                    defer {
+                        isExtractingPhotos = false
+                        for url in urlsToImport { PhotoImportStaging.release(url) }
                     }
-                    await libraryManager.importFiles(from: urlsToImport, isHidden: filterTab == 2)
+                    libraryManager.importStatusText = "正在从系统相册提取视频…"
+                    for item in itemsToImport {
+                        if let movie = try? await item.loadTransferable(type: VideoTransferable.self) { urlsToImport.append(movie.url) }
+                    }
+                    await libraryManager.importFiles(from: urlsToImport, isHidden: selectionIsPrivate)
                 }
             }
             #endif
@@ -219,6 +250,42 @@ public struct MediaLibraryHomeView: View {
             .sheet(isPresented: $showLANUpload) {
                 LANUploadSheet()
             }
+            .sheet(isPresented: $showVaultSetup) {
+                VaultPasswordSetupSheet {
+                    showVaultUnlocked = true
+                    filterTab = 2
+                    if let pendingVaultMove {
+                        Task {
+                            do { try await libraryManager.toggleHideVideo(pendingVaultMove) }
+                            catch { libraryManager.showNotification(message: error.localizedDescription, isError: true) }
+                        }
+                        self.pendingVaultMove = nil
+                    }
+                }
+            }
+            .confirmationDialog("删除视频？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
+                Button("删除视频及其任务记录", role: .destructive) { if let video = pendingDelete { libraryManager.deleteVideo(video) }; pendingDelete = nil }
+                Button("取消", role: .cancel) { pendingDelete = nil }
+            } message: { Text("删除后无法恢复，请确认已备份。") }
+            .overlay {
+                if scenePhase != .active { Color.black.ignoresSafeArea().overlay(Image(systemName: "lock.shield").foregroundStyle(.white)) }
+            }
+            .searchable(text: $searchText, prompt: "搜索视频名称")
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background {
+                    if selectedVideo?.isHidden == true { selectedVideo = nil }
+                    vault.lockVault()
+                    showVaultUnlocked = false
+                    if filterTab == 2 { filterTab = 0 }
+                    subtitleTasks.pausePrivateTasks()
+                    subtitleTasks.flushTasks()
+                    PlaybackHistoryManager.shared.flush()
+                    MediaIdentityStore.shared.flush()
+                }
+            }
+            .onChange(of: filterTab) { old, new in
+                if old == 2, new != 2 { vault.lockVault(); showVaultUnlocked = false; subtitleTasks.pausePrivateTasks() }
+            }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
@@ -233,15 +300,16 @@ public struct MediaLibraryHomeView: View {
                 switch result {
                 case .success(let urls):
                     guard !urls.isEmpty else { return }
+                    let selectionIsPrivate = importIntoVault
                     Task {
-                        await libraryManager.importFiles(from: urls, isHidden: filterTab == 2)
+                        await libraryManager.importFiles(from: urls, isHidden: selectionIsPrivate)
                     }
                 case .failure(let error):
                     print("文件选择器未选择或出错: \(error.localizedDescription)")
                 }
             }
             .alert("输入保险箱密码", isPresented: $showPinDialog) {
-                SecureField("输入4位密码", text: $pinInput)
+                SecureField("输入保险箱密码", text: $pinInput)
                 Button("验证") {
                     let verify = VaultManager.shared.verifyPassword(pinInput)
                     if verify.success {
@@ -251,6 +319,7 @@ public struct MediaLibraryHomeView: View {
                             filterTab = 2
                         }
                     }
+                    if !verify.success { libraryManager.showNotification(message: vault.retryAfter > 0 ? "请等待 \(vault.retryAfter) 秒后重试" : "密码不正确", isError: true) }
                     pinInput = ""
                 }
                 Button("取消", role: .cancel) {
@@ -301,11 +370,11 @@ public struct MediaLibraryHomeView: View {
             // 导入视频按钮
             Menu {
                 #if os(iOS)
-                Button(action: { isPhotosPickerPresented = true }) {
+                Button(action: { importIntoVault = filterTab == 2; isPhotosPickerPresented = true }) {
                     Label("从相册导入", systemImage: "photo.on.rectangle")
                 }
                 #endif
-                Button(action: { isFileImporterPresented = true }) {
+                Button(action: { importIntoVault = filterTab == 2; isFileImporterPresented = true }) {
                     Label("从文件导入", systemImage: "folder")
                 }
             } label: {
@@ -332,6 +401,15 @@ public struct MediaLibraryHomeView: View {
                         .fill(Color.white.opacity(0.1))
                 )
             }
+
+            Menu {
+                Picker("排序", selection: $sortOrder) {
+                    Text("最新导入").tag("newest")
+                    Text("名称").tag("name")
+                    Text("最近播放").tag("recent")
+                }
+                if filterTab == 2 { Button("锁定保险箱") { vault.lockVault(); showVaultUnlocked = false; filterTab = 0 } }
+            } label: { Image(systemName: "arrow.up.arrow.down").foregroundColor(.white).frame(width: 36, height: 36) }
 
             // 设置按钮
             Button(action: { showSubtitleTasks = true }) {
@@ -424,6 +502,7 @@ public struct MediaLibraryHomeView: View {
     }
 
     private func triggerVaultBiometrics() {
+        guard vault.hasPassword else { showVaultSetup = true; return }
         Task {
             // 根据设置决定是否需要 Face ID / Touch ID 验证
             if settings.vaultRequiresBiometrics {
@@ -456,9 +535,7 @@ struct VideoTransferable: Transferable {
         FileRepresentation(contentType: .movie) { movie in
             SentTransferredFile(movie.url)
         } importing: { received in
-            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(received.file.lastPathComponent)
-            try? FileManager.default.removeItem(at: copy)
-            try FileManager.default.copyItem(at: received.file, to: copy)
+            let copy = try await Task.detached(priority: .utility) { try PhotoImportStaging.copy(received.file) }.value
             return VideoTransferable(url: copy)
         }
     }

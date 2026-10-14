@@ -58,14 +58,25 @@ public final class MediaLibraryManager: ObservableObject {
         reloadLibrary()
     }
 
-    /// 重新扫描所有视频
+    private var scanTask: Task<Void, Never>?
+    private var scanGeneration = UUID()
+
+    /// Cancel stale scans and reuse unchanged metadata/identities.
     public func reloadLibrary() {
-        Task {
+        scanTask?.cancel()
+        let generation = UUID()
+        scanGeneration = generation
+        scanTask = Task {
             isLoading = true
             let scanned = await scanLocalVideos()
-            self.videos = scanned
-            self.isLoading = false
+            guard !Task.isCancelled, generation == scanGeneration else { return }
+            videos = scanned
+            isLoading = false
         }
+    }
+
+    public func refreshPlaybackPositions() {
+        for index in videos.indices { videos[index].lastPlayedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: videos[index].fileURL) }
     }
 
     private func scanLocalVideos() async -> [VideoItem] {
@@ -75,11 +86,12 @@ public final class MediaLibraryManager: ObservableObject {
         // 1. 扫描 Documents 根目录及 Clips 目录
         let urlsToScan = [documentsDirectory, clipsDirectory]
         for baseDir in urlsToScan {
-            guard let contents = try? fileManager.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) else {
+            guard let contents = await Task.detached(priority: .utility, operation: { try? FileManager.default.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) }).value else {
                 continue
             }
 
             for url in contents {
+                if Task.isCancelled { return items }
                 let ext = url.pathExtension.lowercased()
                 if allowedExtensions.contains(ext) {
                     if let item = await buildVideoItem(from: url, isHidden: false) {
@@ -90,8 +102,10 @@ public final class MediaLibraryManager: ObservableObject {
         }
 
         // 2. 扫描 .Vault 隐私目录
-        if let vaultContents = try? fileManager.contentsOfDirectory(at: vaultDirectory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: []) {
+        let privateDirectory = vaultDirectory
+        if let vaultContents = await Task.detached(priority: .utility, operation: { try? FileManager.default.contentsOfDirectory(at: privateDirectory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: []) }).value {
             for url in vaultContents {
+                if Task.isCancelled { return items }
                 let ext = url.pathExtension.lowercased()
                 if allowedExtensions.contains(ext) || ext == "vault" {
                     if let item = await buildVideoItem(from: url, isHidden: true) {
@@ -112,21 +126,24 @@ public final class MediaLibraryManager: ObservableObject {
         let date = resources?.contentModificationDate ?? Date()
 
         let asset = AVURLAsset(url: url)
-        var duration: TimeInterval = 0
-        if let dur = try? await asset.load(.duration) {
+        let cachedDuration = MediaIdentityStore.shared.cachedDuration(for: url, size: size, modified: date)
+        var duration: TimeInterval = cachedDuration ?? 0
+        if cachedDuration == nil, url.pathExtension != "vault", let dur = try? await asset.load(.duration) {
             let seconds = CMTimeGetSeconds(dur)
             if seconds.isFinite && !seconds.isNaN && seconds > 0 {
                 duration = seconds
             }
         }
-        if duration <= 0, let av1Info = MP4AV1Demuxer.parseAV1Track(from: url) {
-            duration = av1Info.duration
+        if cachedDuration == nil, duration <= 0, url.pathExtension != "vault" {
+            duration = await Task.detached(priority: .utility) { MP4AV1Demuxer.parseAV1Track(from: url)?.duration ?? 0 }.value
         }
+        MediaIdentityStore.shared.update(url, size: size, modified: date, duration: duration)
 
         // 关联历史播放进度
         let lastPos = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
 
         return VideoItem(
+            id: MediaIdentityStore.shared.id(for: url),
             title: url.lastPathComponent,
             fileURL: url,
             duration: duration,
@@ -137,154 +154,135 @@ public final class MediaLibraryManager: ObservableObject {
         )
     }
 
-    /// 导入单个外部文件（在后台线程执行大文件 IO，避免卡死主线程）
-    public func importFile(from sourceURL: URL, isHidden: Bool = false, moveInsteadOfCopy: Bool = false) async throws {
-        let destFolder = isHidden ? vaultDirectory : documentsDirectory
-        let fileName = sourceURL.lastPathComponent
-        let destURL = destFolder.appendingPathComponent(fileName)
-
-        if FileManager.default.fileExists(atPath: destURL.path) {
-            SubtitleTaskManager.shared.purgeTasks(for: destURL)
-        }
-
-        isImporting = true
-        importStatusText = "正在导入 \(fileName)..."
-
-        let hasAccess = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if hasAccess {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        do {
-            try await Task.detached(priority: .userInitiated) {
-                let fm = FileManager.default
-                if fm.fileExists(atPath: destURL.path) {
-                    try fm.removeItem(at: destURL)
-                }
-                if moveInsteadOfCopy {
-                    try fm.moveItem(at: sourceURL, to: destURL)
-                } else {
-                    try fm.copyItem(at: sourceURL, to: destURL)
-                }
-            }.value
-
-            importStatusText = "正在生成缩略图与媒体索引..."
-            let scanned = await scanLocalVideos()
-            self.videos = scanned
-            isImporting = false
-            importSuccessMessage = "已成功导入：\(fileName)"
-
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                if self.importSuccessMessage == "已成功导入：\(fileName)" {
-                    self.importSuccessMessage = nil
-                }
-            }
-        } catch {
-            isImporting = false
-            throw error
-        }
-    }
-
-    /// 批量导入外部文件（用于从文件或相册导入，提供平滑加载 HUD 样式及实时多文件进度）
-    public func importFiles(from sourceURLs: [URL], isHidden: Bool = false) async {
-        guard !sourceURLs.isEmpty else { return }
-
-        isImporting = true
-        importStatusText = "正在准备导入文件..."
-
-        var successCount = 0
-        var lastSuccessName = ""
-
-        for (index, sourceURL) in sourceURLs.enumerated() {
-            let fileName = sourceURL.lastPathComponent
-            importStatusText = sourceURLs.count > 1 ? "正在导入 (\(index + 1)/\(sourceURLs.count)): \(fileName)" : "正在导入: \(fileName)"
-
-            let hasAccess = sourceURL.startAccessingSecurityScopedResource()
-
-            let destFolder = isHidden ? vaultDirectory : documentsDirectory
-            let destURL = destFolder.appendingPathComponent(fileName)
-
-            if FileManager.default.fileExists(atPath: destURL.path) {
-                SubtitleTaskManager.shared.purgeTasks(for: destURL)
-            }
-
-            do {
-                try await Task.detached(priority: .userInitiated) {
-                    let fm = FileManager.default
-                    if fm.fileExists(atPath: destURL.path) {
-                        try fm.removeItem(at: destURL)
-                    }
-                    try fm.copyItem(at: sourceURL, to: destURL)
-                }.value
-                successCount += 1
-                lastSuccessName = fileName
-            } catch {
-                print("导入文件失败: \(fileName), error: \(error)")
-            }
-
-            if hasAccess {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        importStatusText = "正在生成缩略图与媒体索引..."
-        let scanned = await scanLocalVideos()
-        self.videos = scanned
-
-        // 保留至少 300ms 动画平滑过渡，避免瞬间闪退
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        isImporting = false
-
-        if successCount > 0 {
-            if successCount == 1 {
-                importSuccessMessage = "已成功导入：\(lastSuccessName)"
-            } else {
-                importSuccessMessage = "已成功导入 \(successCount) 个视频文件"
-            }
-
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                self.importSuccessMessage = nil
-            }
-        }
-    }
-
-    /// 将视频移动到保险箱（支持真实 AES-256 加密落盘）/ 移出保险箱
-    public func toggleHideVideo(_ video: VideoItem) async throws {
-        SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
-        if video.isHidden {
-            // 移出保险箱 -> 解密回 Documents
-            let destName = video.fileURL.lastPathComponent.replacingOccurrences(of: ".vault", with: "")
-            let targetURL = documentsDirectory.appendingPathComponent(destName)
-            if fileManager.fileExists(atPath: targetURL.path) {
-                try fileManager.removeItem(at: targetURL)
-            }
-            if video.fileURL.pathExtension.lowercased() == "vault" {
-                try VaultManager.shared.decryptFile(at: video.fileURL, destinationURL: targetURL)
-                try? fileManager.removeItem(at: video.fileURL)
-            } else {
-                try fileManager.moveItem(at: video.fileURL, to: targetURL)
-            }
+    private func ingest(_ source: URL, isHidden: Bool, removeSource: Bool = false) async throws -> URL {
+        let access = source.startAccessingSecurityScopedResource()
+        defer { if access { source.stopAccessingSecurityScopedResource() } }
+        let folder = isHidden ? vaultDirectory : documentsDirectory
+        let name = source.lastPathComponent + (isHidden ? ".vault" : "")
+        let destination = SafeFileImport.availableURL(name: name, in: folder)
+        if isHidden {
+            let sourceItem = await buildVideoItem(from: source, isHidden: false)
+            try await VaultManager.shared.encryptFile(at: source, destinationURL: destination)
+            let resource = try destination.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            MediaIdentityStore.shared.update(destination, size: Int64(resource.fileSize ?? 0), modified: resource.contentModificationDate ?? Date(), duration: sourceItem?.duration ?? 0)
         } else {
-            // 移入保险箱 -> 进行 AES 加密保护并修改扩展名为 .vault
-            let destName = video.fileURL.lastPathComponent + ".vault"
-            let targetURL = vaultDirectory.appendingPathComponent(destName)
-            if fileManager.fileExists(atPath: targetURL.path) {
-                try fileManager.removeItem(at: targetURL)
+            let task = Task.detached(priority: .utility) { try SafeFileImport.copy(source, to: destination) }
+            try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        }
+        // Removing a temporary transfer source is safe only after a complete destination exists.
+        if removeSource, source.standardizedFileURL != destination.standardizedFileURL { try? fileManager.removeItem(at: source) }
+        return destination
+    }
+
+    public func importFile(from sourceURL: URL, isHidden: Bool = false, moveInsteadOfCopy: Bool = false) async throws {
+        guard !isImporting else { throw CocoaError(.fileWriteFileExists) }
+        isImporting = true
+        defer { isImporting = false }
+        importStatusText = "正在导入 \(sourceURL.lastPathComponent)…"
+        let destination = try await ingest(sourceURL, isHidden: isHidden, removeSource: moveInsteadOfCopy)
+        reloadLibrary()
+        showNotification(message: "已导入：\(destination.lastPathComponent)", videoURL: destination)
+    }
+
+    public func importFiles(from sourceURLs: [URL], isHidden: Bool = false) async {
+        guard !sourceURLs.isEmpty, !isImporting else { return }
+        isImporting = true
+        defer { isImporting = false }
+        var success = 0
+        var failed: [String] = []
+        for (index, source) in sourceURLs.enumerated() {
+            importStatusText = "正在导入 \(index + 1)/\(sourceURLs.count)：\(source.lastPathComponent)"
+            do { _ = try await ingest(source, isHidden: isHidden); success += 1 }
+            catch { failed.append(source.lastPathComponent) }
+        }
+        reloadLibrary()
+        showNotification(message: failed.isEmpty ? "已导入 \(success) 个视频" : "已导入 \(success) 个，失败 \(failed.count) 个：\(failed.prefix(3).joined(separator: "、"))。原文件保留，可重新选择导入。", isError: !failed.isEmpty)
+    }
+
+    private var movingVideos: Set<URL> = []
+
+    public func toggleHideVideo(_ video: VideoItem) async throws {
+        let source = video.fileURL
+        guard movingVideos.insert(source).inserted else { throw NSError(domain: "MediaLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: "该视频正在移动，请稍后再试"]) }
+        defer { movingVideos.remove(source) }
+        SubtitleTaskManager.shared.pauseTasks(for: source)
+        let document = SubtitleCacheStore().load(for: source)
+        let identity = MediaIdentityStore.shared.id(for: source)
+        let companionDirectory = vaultDirectory.appendingPathComponent(".Subtitles", isDirectory: true).appendingPathComponent(identity.uuidString, isDirectory: true)
+        var archivedCompanions: [URL] = []
+        let name = video.isHidden && source.pathExtension == "vault" ? source.deletingPathExtension().lastPathComponent : source.lastPathComponent
+        let destination = SafeFileImport.availableURL(name: name + (video.isHidden ? "" : ".vault"), in: video.isHidden ? documentsDirectory : vaultDirectory)
+        var committed = false
+        var createdDestination = false
+        var newCompanions: [URL] = []
+        defer {
+            if !committed {
+                if createdDestination { try? fileManager.removeItem(at: destination) }
+                for file in newCompanions { try? fileManager.removeItem(at: file) }
             }
-            try VaultManager.shared.encryptFile(at: video.fileURL, destinationURL: targetURL)
-            try? fileManager.removeItem(at: video.fileURL)
+        }
+        if video.isHidden {
+            if source.pathExtension == "vault" { try await VaultManager.shared.decryptFile(at: source, destinationURL: destination) }
+            else { try await Task.detached { try SafeFileImport.copy(source, to: destination) }.value }
+        } else { try await VaultManager.shared.encryptFile(at: source, destinationURL: destination) }
+        createdDestination = true
+        if !video.isHidden {
+            let base = source.deletingPathExtension()
+            let companions = ["srt", "source.srt", "bilingual.srt", "zh-Hans.srt", "zh.srt", "ja.srt", "en.srt", "lovort-subtitles.json"].map { base.appendingPathExtension($0) }.filter { fileManager.fileExists(atPath: $0.path) }
+            if !companions.isEmpty { try fileManager.createDirectory(at: companionDirectory, withIntermediateDirectories: true) }
+            let publicLegacyCaches = SubtitleCacheStore().cacheCandidates(for: source).filter {
+                $0.path.hasPrefix(documentsDirectory.path + "/") && fileManager.fileExists(atPath: $0.path) && !companions.contains($0)
+            }
+            if !publicLegacyCaches.isEmpty { try fileManager.createDirectory(at: companionDirectory, withIntermediateDirectories: true) }
+            for file in companions + publicLegacyCaches {
+                let encrypted = SafeFileImport.availableURL(name: file.lastPathComponent + ".vault", in: companionDirectory)
+                try await VaultManager.shared.encryptFile(at: file, destinationURL: encrypted)
+                newCompanions.append(encrypted)
+                archivedCompanions.append(file)
+            }
+        } else if let files = try? fileManager.contentsOfDirectory(at: companionDirectory, includingPropertiesForKeys: nil) {
+            let oldBase = source.deletingPathExtension().deletingPathExtension().lastPathComponent
+            let newBase = destination.deletingPathExtension().lastPathComponent
+            for encrypted in files where encrypted.pathExtension == "vault" {
+                let originalName = encrypted.deletingPathExtension().lastPathComponent
+                guard originalName.hasPrefix(oldBase + ".") else { continue }
+                let name = newBase + String(originalName.dropFirst(oldBase.count))
+                let restored = SafeFileImport.availableURL(name: name, in: documentsDirectory)
+                try await VaultManager.shared.decryptFile(at: encrypted, destinationURL: restored)
+                newCompanions.append(restored)
+            }
+        }
+        // Retain source and destination on removal failure; never silently discard user data.
+        do { try fileManager.removeItem(at: source) }
+        catch { reloadLibrary(); throw error }
+        committed = true
+        SubtitleTaskManager.shared.relocateTasks(from: source, to: destination, isPrivate: !video.isHidden)
+        var cleanupFailed = false
+        for file in archivedCompanions { do { try fileManager.removeItem(at: file) } catch { cleanupFailed = true } }
+        if cleanupFailed { showNotification(message: "视频已加密，但部分原字幕文件未能移除，请检查“文件”中的字幕副本。", isError: true) }
+        if video.isHidden { try? fileManager.removeItem(at: companionDirectory) }
+        MediaIdentityStore.shared.transfer(from: source, to: destination)
+        let resource = try destination.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        MediaIdentityStore.shared.update(destination, size: Int64(resource.fileSize ?? 0), modified: resource.contentModificationDate ?? Date(), duration: video.duration)
+        if let document {
+            let rebound = SubtitleDocument(sourceLanguage: document.sourceLanguage, targetLanguage: document.targetLanguage,
+                engine: document.engine, model: document.model, translationProvider: document.translationProvider,
+                translationConfiguration: document.translationConfiguration, isComplete: document.isComplete ?? true,
+                translationComplete: document.translationComplete, gptEnhanced: document.gptEnhanced,
+                completedChunkIndexes: document.completedChunkIndexes, chunkDuration: document.chunkDuration,
+                videoURL: destination, lines: document.lines)
+            _ = try? SubtitleCacheStore().save(rebound, for: destination)
         }
         reloadLibrary()
     }
 
-    /// 删除视频
     public func deleteVideo(_ video: VideoItem) {
-        SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
-        try? fileManager.removeItem(at: video.fileURL)
-        reloadLibrary()
+        guard !movingVideos.contains(video.fileURL) else { showNotification(message: "该视频正在移动，请稍后再删除", isError: true); return }
+        do {
+            try fileManager.removeItem(at: video.fileURL)
+            SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
+            MediaIdentityStore.shared.remove(video.fileURL)
+            videos.removeAll { $0.id == video.id }
+        } catch { showNotification(message: "删除失败：\(error.localizedDescription)", isError: true) }
     }
 }

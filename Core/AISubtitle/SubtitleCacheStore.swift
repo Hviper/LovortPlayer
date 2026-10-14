@@ -81,34 +81,28 @@ public struct SubtitleCacheStore: Sendable {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(document)
 
-        let sidecarURL = sidecarURL(for: videoURL)
-        do {
-            try data.write(to: sidecarURL, options: .atomic)
-            return sidecarURL
-        } catch {
-            let fallbackURL = fallbackURL(for: videoURL)
-            try FileManager.default.createDirectory(
-                at: fallbackURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: fallbackURL, options: .atomic)
-            return fallbackURL
-        }
+        let destination = fallbackURL(for: videoURL)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
+        #if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
+        #endif
+        return destination
     }
 
     public func sidecarURL(for videoURL: URL) -> URL {
         videoURL.deletingPathExtension().appendingPathExtension("lovort-subtitles.json")
     }
 
-    private func cacheCandidates(for videoURL: URL) -> [URL] {
-        [sidecarURL(for: videoURL), fallbackURL(for: videoURL)]
+    public func cacheCandidates(for videoURL: URL) -> [URL] {
+        let legacyFolder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("SubtitleCache", isDirectory: true)
+        let legacy = legacyFolder.appendingPathComponent("\(stableIdentifier(for: videoURL))-\(videoURL.deletingPathExtension().lastPathComponent).json")
+        return [fallbackURL(for: videoURL), sidecarURL(for: videoURL), legacy]
     }
 
     private func fallbackURL(for videoURL: URL) -> URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let folder = documents.appendingPathComponent("SubtitleCache", isDirectory: true)
-        let identifier = stableIdentifier(for: videoURL)
-        return folder.appendingPathComponent("\(identifier)-\(videoURL.deletingPathExtension().lastPathComponent).json")
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return support.appendingPathComponent("SubtitleCache", isDirectory: true).appendingPathComponent(MediaIdentityStore.shared.id(for: videoURL).uuidString + ".json")
     }
 
     private func stableIdentifier(for videoURL: URL) -> String {
