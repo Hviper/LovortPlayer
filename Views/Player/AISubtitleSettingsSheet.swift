@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 
 @MainActor
 private final class SubtitlePreviewController: ObservableObject {
@@ -247,6 +250,10 @@ public struct AISubtitleSettingsSheet: View {
                         .stroke(AppSettings.shared.themeColor.color.opacity(0.35), lineWidth: 1)
                 )
             }
+
+            TranslationConnectionTestView(configuration: TranslationConnectionConfiguration(
+                settings: TranslationAPISettings(provider: .openAI), apiKey: apiKey,
+                openAIModel: modelManager.selectedModelID))
 
             if let msg = modelManager.fetchMessage {
                 Text(msg)

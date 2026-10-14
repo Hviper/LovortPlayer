@@ -8,7 +8,7 @@ public enum VolcengineAuthenticationMode: String, CaseIterable, Sendable, Identi
     public var displayName: String { self == .apiKey ? "API Key" : "Access Key ID / Secret Access Key" }
 }
 
-public struct VolcengineAccessCredentials: Sendable {
+public struct VolcengineAccessCredentials: Sendable, Equatable {
     public let accessKeyID: String
     public let secretAccessKey: String
     public init(accessKeyID: String, secretAccessKey: String) {

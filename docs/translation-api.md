@@ -31,3 +31,11 @@
 参考：[Apple translationTask](https://developer.apple.com/documentation/swiftui/view/translationtask(_:action:))、[Apple prepareTranslation](https://developer.apple.com/documentation/translation/translationsession/preparetranslation())、[火山方舟 Base URL 与鉴权](https://docs.volcengine.com/docs/ark/base-url-and-authentication?lang=en)。全屏承载调整来自本项目的视图生命周期风险分析，仍需真机验证。
 
 凭证文档：[智谱 API 鉴权](https://docs.bigmodel.cn/cn/api/introduction)、[火山方舟鉴权](https://docs.volcengine.com/docs/ark/base-url-and-authentication?lang=en)、[GetApiKey](https://docs.volcengine.com/docs/ark/get-api-key-api?lang=zh)、[火山官方签名 SDK](https://github.com/volcengine/volcengine-python-sdk/blob/master/volcenginesdkcore/signv4.py)。
+
+## 连接测试
+
+翻译 API 管理与播放器的 GPT 模型选择区提供“测试连接”。使用当前输入的凭证、地址、鉴权方式与模型翻译固定短句 `Hello.`，不保存草稿、不切换服务、不读取视频或更新字幕缓存。配置为空会明确失败，测试不回退系统翻译。GPT 使用真实字幕翻译的 Responses 接口及代理设置，只测试当前选中的模型，不通过备用模型掩盖错误。
+
+成功显示耗时及模型，失败提示鉴权、模型/地址、额度、网络或格式问题；不显示服务返回的原始错误正文。修改草稿、取消测试或离开页面会取消请求并丢弃旧结果。测试请求使用 30 秒请求/45 秒资源超时，火山 AK/SK 的换取临时凭证与翻译分别发出请求。真实 API 测试可能产生少量调用费用。
+
+连接测试新增 4 个回归场景：指定 GPT 模型、不可用模型不得回退、空凭证/空结果与错误隐私、自定义草稿请求不落盘。

@@ -231,3 +231,119 @@ private final class VolcengineTestURLProtocol: URLProtocol, @unchecked Sendable 
     }
     override func stopLoading() {}
 }
+
+final class TranslationConnectionTests: XCTestCase {
+    @MainActor
+    func testDraftConnectionUsesExactModelWithoutSaving() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ConnectionTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let draft = TranslationConnectionConfiguration(settings: TranslationAPISettings(provider: .openAI),
+            apiKey: "sk-test-only", openAIModel: "test-selected-model")
+        let previousModel = AIModelManager.shared.selectedModelID
+        let value = try await TranslationConnectionTester.test(draft, session: session)
+        XCTAssertEqual(value, "你好")
+        XCTAssertEqual(AIModelManager.shared.selectedModelID, previousModel)
+    }
+
+    @MainActor
+    func testInvalidSelectedGPTModelCannotPassByFallingBack() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ConnectionTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let draft = TranslationConnectionConfiguration(settings: TranslationAPISettings(provider: .openAI),
+            apiKey: "sk-test-only", openAIModel: "unavailable-model")
+        do {
+            _ = try await TranslationConnectionTester.test(draft, session: session)
+            XCTFail("The exact selected model must fail; fallback must not hide the failure")
+        } catch {
+            XCTAssertTrue(TranslationConnectionTester.errorMessage(error).contains("404"))
+            XCTAssertFalse(TranslationConnectionTester.errorMessage(error).contains("sk-test-only"))
+        }
+    }
+
+    @MainActor
+    func testEmptyCredentialAndEmptyResponseCannotPass() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ConnectionTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        for (key, model) in [("", "test-selected-model"), ("sk-test-only", "empty-model")] {
+            do {
+                _ = try await TranslationConnectionTester.test(TranslationConnectionConfiguration(
+                    settings: TranslationAPISettings(provider: .openAI), apiKey: key, openAIModel: model), session: session)
+                XCTFail("Invalid credentials and empty output must fail")
+            } catch {}
+        }
+        let secretError = NSError(domain: "SubtitleTranslationProvider", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "HTTP 401 sk-test-only echoed-server-body"])
+        let message = TranslationConnectionTester.errorMessage(secretError)
+        XCTAssertTrue(message.contains("401"))
+        XCTAssertFalse(message.contains("sk-test-only"))
+        XCTAssertFalse(message.contains("echoed-server-body"))
+    }
+
+    @MainActor
+    func testCustomDraftTestsInputWithoutPersisting() async throws {
+        let network = URLSessionConfiguration.ephemeral
+        network.protocolClasses = [ConnectionTestURLProtocol.self]
+        let session = URLSession(configuration: network)
+        defer { session.invalidateAndCancel() }
+        let before = TranslationAPISettings(provider: .customChat)
+        var draft = before
+        draft.url = "https://draft-test.invalid/v1"
+        draft.model = "test-selected-model"
+        let value = try await TranslationConnectionTester.test(TranslationConnectionConfiguration(
+            settings: draft, apiKey: "draft-secret"), session: session)
+        XCTAssertEqual(value, "你好")
+        XCTAssertEqual(TranslationAPISettings(provider: .customChat), before)
+    }
+}
+
+private final class ConnectionTestURLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var body = request.httpBody
+        if body == nil, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var bytes = [UInt8](repeating: 0, count: 1024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&bytes, maxLength: bytes.count)
+                guard count > 0 else { break }
+                data.append(bytes, count: count)
+            }
+            body = data
+        }
+        let object = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any]
+        let model = object?["model"] as? String ?? ""
+        let status = model == "unavailable-model" ? 404 : 200
+        let text = model == "empty-model" ? " " : model == "test-selected-model" ? "你好" : "备用模型"
+        let content = "[{\"index\":0,\"translation\":\"\(text)\"}]"
+        let payload: [String: Any]
+        if status == 404 {
+            payload = ["error": ["message": "sk-test-only echoed-server-body"]]
+        } else if request.url?.path == "/v1/responses" {
+            guard request.httpMethod == "POST", object?["store"] as? Bool == false,
+                  (object?["input"] as? String)?.contains("Hello.") == true else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+            }
+            payload = ["output_text": content]
+        } else {
+            guard request.url?.host == "draft-test.invalid", request.url?.path == "/v1/chat/completions",
+                  model == "test-selected-model", request.value(forHTTPHeaderField: "Authorization") == "Bearer draft-secret" else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+            }
+            payload = ["choices": [["message": ["content": content]]]]
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: payload))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}

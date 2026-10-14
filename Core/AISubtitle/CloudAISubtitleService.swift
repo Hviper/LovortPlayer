@@ -4,12 +4,14 @@ import Foundation
 public final class CloudAISubtitleService: @unchecked Sendable {
     private let apiKey: String
     private let baseURL: URL
+    private let sessionOverride: URLSession?
     private let maximumUploadBytes = 24 * 1_024 * 1_024
     private let cloudSliceDuration: TimeInterval = 4 * 60
 
-    public init(apiKey: String, baseURL: URL = URL(string: "https://api.openai.com/v1")!) {
+    public init(apiKey: String, baseURL: URL = URL(string: "https://api.openai.com/v1")!, session: URLSession? = nil) {
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baseURL = baseURL
+        self.sessionOverride = session
     }
 
     public func transcribe(
@@ -247,7 +249,22 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         return try await requestPlatformResponse(prompt: prompt, model: model)
     }
 
-    private func requestPlatformResponse(prompt: String, model: String) async throws -> String {
+    /// Tests the selected model directly. Unlike subtitle translation, this never falls back to another model.
+    public func testConnection(model: String) async throws -> String {
+        guard apiKey.hasPrefix("sk-") else { throw serviceError("请填写 OpenAI Platform API Key（sk- 开头）") }
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { throw serviceError("请先选择模型") }
+        let content = try await requestPlatformResponse(
+            prompt: "Translate Hello. into Simplified Chinese. Return a JSON array: [{\"index\":0,\"translation\":\"...\"}].",
+            model: model, connectionTest: true)
+        let values = try Self.decodeTranslations(from: content, expectedCount: 1)
+        guard let value = values.first, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw serviceError("模型未返回有效翻译")
+        }
+        return value
+    }
+
+    private func requestPlatformResponse(prompt: String, model: String, connectionTest: Bool = false) async throws -> String {
         var request = URLRequest(url: baseURL.appendingPathComponent("responses"))
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -258,7 +275,8 @@ public final class CloudAISubtitleService: @unchecked Sendable {
             "input": prompt,
             "store": false
         ])
-        let (data, response) = try await createProxyAwareSession().data(for: request)
+        if connectionTest { request.timeoutInterval = 30 }
+        let (data, response) = try await createProxyAwareSession(connectionTest: connectionTest).data(for: request)
         try validate(response: response, data: data)
         return try extractResponseText(from: data)
     }
@@ -372,10 +390,11 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         }
     }
 
-    private func createProxyAwareSession() -> URLSession {
+    private func createProxyAwareSession(connectionTest: Bool = false) -> URLSession {
+        if let sessionOverride { return sessionOverride }
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 90
-        configuration.timeoutIntervalForResource = 600
+        configuration.timeoutIntervalForRequest = connectionTest ? 30 : 90
+        configuration.timeoutIntervalForResource = connectionTest ? 45 : 600
         let proxyHost = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
         let proxyPort = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
         if !proxyHost.isEmpty, proxyPort > 0 {

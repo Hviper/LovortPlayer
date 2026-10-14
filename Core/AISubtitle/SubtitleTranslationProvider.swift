@@ -108,8 +108,10 @@ public struct RESTTranslationProvider: SubtitleTranslationProviding {
     public let provider: SubtitleTranslationProviderType
     public let apiKey: String
     public let azureRegion: String
+    private let session: URLSession?
 
-    public init(provider: SubtitleTranslationProviderType, apiKey: String, azureRegion: String = "") {
+    public init(provider: SubtitleTranslationProviderType, apiKey: String, azureRegion: String = "", session: URLSession? = nil) {
+        self.session = session
         self.provider = provider
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.azureRegion = azureRegion.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -229,7 +231,7 @@ public struct RESTTranslationProvider: SubtitleTranslationProviding {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 90
         configuration.timeoutIntervalForResource = 600
-        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        let (data, response) = try await (session ?? URLSession(configuration: configuration)).data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             let responseText = String(decoding: data.prefix(500), as: UTF8.self)
@@ -277,7 +279,7 @@ private extension String {
 }
 
 /// Non-secret configuration lives in defaults; credentials stay in Keychain.
-public struct TranslationAPISettings: Sendable {
+public struct TranslationAPISettings: Sendable, Equatable {
     public let provider: SubtitleTranslationProviderType
     public var url: String
     public var model: String

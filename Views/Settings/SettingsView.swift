@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(LovortPlayerCore)
+import LovortPlayerCore
+#endif
 
 /// 完整的 Lovort 设置页面
 public struct SettingsView: View {
@@ -484,7 +487,7 @@ public struct TranslationAPIManagementView: View {
                     AISubtitleCoordinator.shared.translationProvider = value
                 }
             } footer: {
-                Text("默认使用系统翻译。第三方服务未填写 API Key 时使用系统翻译；请求失败时保留原文字幕，可稍后重试。")
+                Text("默认使用系统翻译。第三方服务未填写凭证时使用系统翻译；请求失败时保留原文字幕，可稍后重试。")
             }
             if provider == .apple {
                 Section {
@@ -502,6 +505,7 @@ public struct TranslationAPIManagementView: View {
 }
 
 private struct TranslationAPICredentialEditor: View {
+    @ObservedObject private var modelManager = AIModelManager.shared
     let provider: SubtitleTranslationProviderType
     @State private var apiKey: String
     @State private var url: String
@@ -561,11 +565,26 @@ private struct TranslationAPICredentialEditor: View {
                 TextField("Azure 区域（如 eastasia）", text: $region)
                     .autocorrectionDisabled()
             }
+            if provider == .openAI {
+                Text("测试模型：\(modelManager.selectedModelID)").font(.footnote).foregroundStyle(.secondary)
+            }
             Button("保存配置") { save() }
+            TranslationConnectionTestView(configuration: testConfiguration)
             if !status.isEmpty { Text(status).font(.footnote) }
         } footer: {
             Text(credentialHelp)
         }
+    }
+
+    private var testConfiguration: TranslationConnectionConfiguration {
+        var settings = TranslationAPISettings(provider: provider)
+        settings.url = url
+        settings.model = model
+        settings.authenticationMode = authenticationMode
+        return TranslationConnectionConfiguration(
+            settings: settings, apiKey: apiKey, azureRegion: region,
+            accessCredentials: VolcengineAccessCredentials(accessKeyID: accessKeyID, secretAccessKey: secretAccessKey),
+            openAIModel: modelManager.selectedModelID)
     }
 
     private var modelField: some View {
