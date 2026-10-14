@@ -118,8 +118,8 @@ public actor LocalWhisperSubtitleService {
     private var pipeline: WhisperKit?
     private var loadedModel: OfflineWhisperModel?
     public static let chunkDuration: TimeInterval = 4 * 60
-    static let defaultUsesRelaxedVoiceDetection = false
-    static let previewUsesRelaxedVoiceDetection = true
+    public static let defaultUsesRelaxedVoiceDetection = false
+    public static let previewUsesRelaxedVoiceDetection = true
 
     private var activeTranscriptionCount: Int = 0
     private var idleUnloadTask: Task<Void, Never>?
@@ -468,7 +468,7 @@ public actor LocalWhisperSubtitleService {
             wordTimestamps: false,
             noSpeechThreshold: useRelaxedVoiceDetection ? nil : 0.6,
             concurrentWorkerCount: 4,
-            chunkingStrategy: useRelaxedVoiceDetection ? .none : .vad
+            chunkingStrategy: useRelaxedVoiceDetection ? ChunkingStrategy.none : .vad
         )
         let throttle = ProgressThrottleBox()
         let inputOptions = AudioInputOptions(channelMode: .sumChannels(nil), audioLoadingMode: .incremental)
