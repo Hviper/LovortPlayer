@@ -507,11 +507,10 @@ public actor LocalWhisperSubtitleService {
         let sourceAsset = AVURLAsset(url: mediaURL)
         let tracks = try await sourceAsset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else { throw serviceError("视频中没有可用音轨") }
-        let candidates = sourceLanguage.trackLanguageCandidates
-        let selectedTrack = tracks.first { track in
-            let tag = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
-            return candidates.contains { tag == $0 || tag.hasPrefix("\($0)-") }
-        } ?? tracks[0]
+        let selectedTrack = AudioTrackSelection.orderedTracks(
+            tracks,
+            sourceLanguage: sourceLanguage
+        )[0]
         let timeRange = try await selectedTrack.load(.timeRange)
         let composition = AVMutableComposition()
         guard let compositionTrack = composition.addMutableTrack(

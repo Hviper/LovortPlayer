@@ -396,7 +396,7 @@ public struct AISubtitleSettingsSheet: View {
                             Text(error).font(.system(size: 11)).foregroundColor(.orange)
                         }
                         if let result = preview.result {
-                            Text("预览区间：\(Int(result.startTime))–\(Int(result.endTime)) 秒 · \(result.lines.count) 句")
+                            Text("预览区间：\(Int(result.startTime))–\(Int(result.endTime)) 秒 · \(result.audioTrackDescription) · \(result.lines.count) 句")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.white.opacity(0.7))
                             Text("预览耗时 \(Int(result.elapsedTime.rounded())) 秒（含模型加载和翻译）")

@@ -22,6 +22,7 @@ public struct SubtitlePreviewResult: Sendable {
     public let startTime: TimeInterval
     public let endTime: TimeInterval
     public let elapsedTime: TimeInterval
+    public let audioTrackDescription: String
     public let lines: [SubtitleLine]
     public let translationWarning: String?
 }
@@ -115,11 +116,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             )
         }
 
-        let candidates = sourceLanguage.trackLanguageCandidates
-        let selectedTrack = tracks.first { track in
-            let tag = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
-            return candidates.contains { tag == $0 || tag.hasPrefix("\($0)-") }
-        } ?? tracks.first!
+        let selectedTrack = AudioTrackSelection.orderedTracks(
+            tracks,
+            sourceLanguage: sourceLanguage
+        )[0]
 
         let composition = AVMutableComposition()
         guard let compositionTrack = composition.addMutableTrack(
@@ -456,10 +456,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
 
         let asset = AVURLAsset(url: videoURL)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
-        guard let track = tracks.first(where: { track in
-            let tag = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
-            return sourceLanguage.trackLanguageCandidates.contains { tag == $0 || tag.hasPrefix("\($0)-") }
-        }) ?? tracks.first else {
+        guard !tracks.isEmpty else {
             throw NSError(domain: "SubtitlePreview", code: -3,
                           userInfo: [NSLocalizedDescriptionKey: "视频没有可用音轨"])
         }
@@ -470,41 +467,44 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }
         let begin = min(max(0, startTime), max(0, duration - 30))
         let length = min(30, duration - begin)
-        let composition = AVMutableComposition()
-        guard let compositionTrack = composition.addMutableTrack(
-            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw NSError(domain: "SubtitlePreview", code: -5,
-                          userInfo: [NSLocalizedDescriptionKey: "无法创建预览音轨"])
+        let orderedTracks = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage)
+        var sourceLines: [SubtitleLine]?
+        var matchedTrackDescription: String?
+        for (attempt, track) in orderedTracks.enumerated() {
+            try Task.checkCancellation()
+            let originalIndex = tracks.firstIndex(where: { $0 === track }) ?? attempt
+            let description = AudioTrackSelection.displayName(for: track, at: originalIndex)
+            onProgress?("正在提取 30 秒预览音频（\(description)，第 \(attempt + 1)/\(orderedTracks.count) 条）…")
+            let clipURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("lovort-preview-\(UUID().uuidString).m4a")
+            defer { try? FileManager.default.removeItem(at: clipURL) }
+            do {
+                try await exportPreviewAudio(
+                    track: track, start: begin, duration: length, outputURL: clipURL
+                )
+                let lines = try await localService.transcribe(
+                    audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
+                    onProgress: onProgress
+                ).map { line in
+                    SubtitleLine(id: line.id, startTime: line.startTime + begin,
+                                 endTime: line.endTime + begin, originalText: line.originalText)
+                }
+                sourceLines = lines
+                matchedTrackDescription = description
+                break
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard isNoSpeechError(error) else { throw error }
+            }
         }
-        let trackRange = try await track.load(.timeRange)
-        try compositionTrack.insertTimeRange(trackRange, of: track, at: .zero)
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
-            throw NSError(domain: "SubtitlePreview", code: -6,
-                          userInfo: [NSLocalizedDescriptionKey: "无法导出预览音频"])
-        }
-        let clipURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lovort-preview-\(UUID().uuidString).m4a")
-        defer { try? FileManager.default.removeItem(at: clipURL) }
-        exporter.outputURL = clipURL
-        exporter.outputFileType = .m4a
-        exporter.timeRange = CMTimeRange(
-            start: CMTime(seconds: begin, preferredTimescale: 600),
-            duration: CMTime(seconds: length, preferredTimescale: 600)
-        )
-        onProgress?("正在提取 30 秒预览音频…")
-        await exporter.export()
-        guard exporter.status == .completed else {
-            throw exporter.error ?? NSError(domain: "SubtitlePreview", code: -7,
-                                            userInfo: [NSLocalizedDescriptionKey: "预览音频导出失败"])
-        }
-        try Task.checkCancellation()
-        let sourceLines = try await localService.transcribe(
-            audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
-            onProgress: onProgress
-        ).map { line in
-            SubtitleLine(id: line.id, startTime: line.startTime + begin,
-                         endTime: line.endTime + begin, originalText: line.originalText)
+        guard let sourceLines, let matchedTrackDescription else {
+            throw NSError(
+                domain: "SubtitlePreview",
+                code: -8,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "已尝试 \(orderedTracks.count) 条音轨，仍未检测到清晰人声；请确认原声音频语言或改用高精度模型"]
+            )
         }
         var resultLines = sourceLines
         var warning: String?
@@ -523,7 +523,46 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         try Task.checkCancellation()
         return SubtitlePreviewResult(startTime: begin, endTime: begin + length,
                                      elapsedTime: Date().timeIntervalSince(startedAt),
+                                     audioTrackDescription: matchedTrackDescription,
                                      lines: resultLines, translationWarning: warning)
+    }
+
+    private func exportPreviewAudio(
+        track: AVAssetTrack,
+        start: TimeInterval,
+        duration: TimeInterval,
+        outputURL: URL
+    ) async throws {
+        let composition = AVMutableComposition()
+        guard let compositionTrack = composition.addMutableTrack(
+            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw NSError(domain: "SubtitlePreview", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey: "无法创建预览音轨"])
+        }
+        let trackRange = try await track.load(.timeRange)
+        try compositionTrack.insertTimeRange(trackRange, of: track, at: .zero)
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(domain: "SubtitlePreview", code: -6,
+                          userInfo: [NSLocalizedDescriptionKey: "无法导出预览音频"])
+        }
+        exporter.outputURL = outputURL
+        exporter.outputFileType = .m4a
+        exporter.timeRange = CMTimeRange(
+            start: CMTime(seconds: start, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
+        await exporter.export()
+        guard exporter.status == .completed else {
+            throw exporter.error ?? NSError(domain: "SubtitlePreview", code: -7,
+                                            userInfo: [NSLocalizedDescriptionKey: "预览音频导出失败"])
+        }
+    }
+
+    private func isNoSpeechError(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == "LocalWhisperError"
+            && error.localizedDescription.contains("未检测到清晰人声")
     }
 
     private func resolveTranslationService(

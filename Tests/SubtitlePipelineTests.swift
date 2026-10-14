@@ -136,6 +136,24 @@ final class SubtitlePipelineTests: XCTestCase {
         XCTAssertNil(SubtitleSourceLanguage.automatic.whisperCode)
     }
 
+    func testAudioTracksPutSelectedLanguageBeforeOtherTracks() {
+        let order = AudioTrackSelection.orderedIndices(
+            languageTags: ["eng", "", "jpn", "ja-JP"],
+            sourceLanguage: .japanese
+        )
+
+        XCTAssertEqual(order, [2, 3, 0, 1])
+    }
+
+    func testAutomaticAudioTrackOrderIsStable() {
+        let order = AudioTrackSelection.orderedIndices(
+            languageTags: ["eng", "jpn", ""],
+            sourceLanguage: .automatic
+        )
+
+        XCTAssertEqual(order, [0, 1, 2])
+    }
+
     func testTranslationJSONIsReorderedByIndex() throws {
         let content = """
         ```json
