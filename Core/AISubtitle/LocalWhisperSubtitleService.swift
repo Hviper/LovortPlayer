@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreML
 import Foundation
 import WhisperKit
 
@@ -106,17 +107,52 @@ public actor LocalWhisperSubtitleService {
             }
             let modelFolder = try await OfflineWhisperModelManager.shared.prepare(model)
             try Task.checkCancellation()
-            pipeline = try await WhisperKit(
-                WhisperKitConfig(
-                    model: model.rawValue,
-                    modelFolder: modelFolder.path,
-                    verbose: false,
-                    prewarm: true,
-                    load: true,
-                    download: false,
-                    useBackgroundDownloadSession: false
+
+            var loadedPipeline: WhisperKit?
+            do {
+                loadedPipeline = try await WhisperKit(
+                    WhisperKitConfig(
+                        model: model.rawValue,
+                        modelFolder: modelFolder.path,
+                        verbose: false,
+                        prewarm: true,
+                        load: true,
+                        download: false,
+                        useBackgroundDownloadSession: false
+                    )
                 )
-            )
+            } catch {
+                // 如果默认配置加载失败（如 ANE / CoreML 神经引擎读取报错），尝试回退到 GPU + CPU 兼容模式
+                let fallbackCompute = ModelComputeOptions(
+                    melCompute: .cpuAndGPU,
+                    audioEncoderCompute: .cpuAndGPU,
+                    textDecoderCompute: .cpuAndGPU
+                )
+                do {
+                    loadedPipeline = try await WhisperKit(
+                        WhisperKitConfig(
+                            model: model.rawValue,
+                            modelFolder: modelFolder.path,
+                            computeOptions: fallbackCompute,
+                            verbose: false,
+                            prewarm: true,
+                            load: true,
+                            download: false,
+                            useBackgroundDownloadSession: false
+                        )
+                    )
+                } catch let loadError {
+                    // 若回退依然失败，说明本地模型文件损坏（如断点残留引发 CoreML: Error in reading the ML network）
+                    await OfflineWhisperModelManager.shared.handleCorruptedModel(model, at: modelFolder)
+                    throw NSError(
+                        domain: "LocalWhisperError",
+                        code: -2,
+                        userInfo: [NSLocalizedDescriptionKey: "离线模型加载失败（文件损坏或不完整: \(loadError.localizedDescription)），已自动清理损坏缓存，请在设置中重新下载该模型"]
+                    )
+                }
+            }
+
+            pipeline = loadedPipeline
             loadedModel = model
         }
 
