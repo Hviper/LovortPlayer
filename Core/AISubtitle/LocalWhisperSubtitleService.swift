@@ -118,6 +118,8 @@ public actor LocalWhisperSubtitleService {
     private var pipeline: WhisperKit?
     private var loadedModel: OfflineWhisperModel?
     public static let chunkDuration: TimeInterval = 4 * 60
+    static let defaultUsesRelaxedVoiceDetection = false
+    static let previewUsesRelaxedVoiceDetection = true
 
     private var activeTranscriptionCount: Int = 0
     private var idleUnloadTask: Task<Void, Never>?
@@ -202,6 +204,7 @@ public actor LocalWhisperSubtitleService {
         preferredStartTime: TimeInterval = 0,
         existingLines: [SubtitleLine] = [],
         completedChunkIndexes: Set<Int> = [],
+        useRelaxedVoiceDetection: Bool = defaultUsesRelaxedVoiceDetection,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> Void)? = nil
     ) async throws -> [SubtitleLine] {
@@ -212,6 +215,7 @@ public actor LocalWhisperSubtitleService {
             preferredStartTime: preferredStartTime,
             existingLines: existingLines,
             completedChunkIndexes: completedChunkIndexes,
+            useRelaxedVoiceDetection: useRelaxedVoiceDetection,
             onProgress: onProgress,
             onPartialResult: { update in
                 await onPartialResult?(update)
@@ -227,6 +231,7 @@ public actor LocalWhisperSubtitleService {
         preferredStartTime: TimeInterval = 0,
         existingLines: [SubtitleLine] = [],
         completedChunkIndexes: Set<Int> = [],
+        useRelaxedVoiceDetection: Bool = defaultUsesRelaxedVoiceDetection,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> [SubtitleLine]?)? = nil
     ) async throws -> [SubtitleLine] {
@@ -411,6 +416,7 @@ public actor LocalWhisperSubtitleService {
                 offset: start,
                 chunkNumber: completed.count + 1,
                 totalChunks: totalChunks,
+                useRelaxedVoiceDetection: useRelaxedVoiceDetection,
                 onProgress: onProgress
             )
 
@@ -451,6 +457,7 @@ public actor LocalWhisperSubtitleService {
         offset: TimeInterval,
         chunkNumber: Int,
         totalChunks: Int,
+        useRelaxedVoiceDetection: Bool,
         onProgress: (@Sendable (String) -> Void)?
     ) async throws -> (lines: [SubtitleLine], detectedLanguage: String?) {
         let options = DecodingOptions(
@@ -459,9 +466,9 @@ public actor LocalWhisperSubtitleService {
             detectLanguage: languageCode == nil,
             skipSpecialTokens: true,
             wordTimestamps: false,
-            noSpeechThreshold: 0.6,
+            noSpeechThreshold: useRelaxedVoiceDetection ? nil : 0.6,
             concurrentWorkerCount: 4,
-            chunkingStrategy: .vad
+            chunkingStrategy: useRelaxedVoiceDetection ? .none : .vad
         )
         let throttle = ProgressThrottleBox()
         let inputOptions = AudioInputOptions(channelMode: .sumChannels(nil), audioLoadingMode: .incremental)
@@ -486,7 +493,10 @@ public actor LocalWhisperSubtitleService {
         var lines: [SubtitleLine] = []
         for segment in segments {
             let text = clean(segment.text)
-            guard !text.isEmpty, segment.end > segment.start, segment.noSpeechProb < 0.9 else { continue }
+            guard !text.isEmpty,
+                  segment.end > segment.start,
+                  (useRelaxedVoiceDetection || segment.noSpeechProb < 0.9)
+            else { continue }
             let candidate = SubtitleLine(
                 startTime: TimeInterval(segment.start) + offset,
                 endTime: TimeInterval(max(segment.end, segment.start + 0.6)) + offset,

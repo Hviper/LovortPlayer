@@ -482,8 +482,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                 try await exportPreviewAudio(
                     track: track, start: begin, duration: length, outputURL: clipURL
                 )
+                onProgress?("正在设备端识别（宽松人声检测）…")
                 let lines = try await localService.transcribe(
                     audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
+                    useRelaxedVoiceDetection: LocalWhisperSubtitleService.previewUsesRelaxedVoiceDetection,
                     onProgress: onProgress
                 ).map { line in
                     SubtitleLine(id: line.id, startTime: line.startTime + begin,

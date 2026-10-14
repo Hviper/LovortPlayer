@@ -154,6 +154,11 @@ final class SubtitlePipelineTests: XCTestCase {
         XCTAssertEqual(order, [0, 1, 2])
     }
 
+    func testRelaxedPreviewDetectionCanBeSelectedWithoutChangingDefaultTranscription() {
+        XCTAssertFalse(LocalWhisperSubtitleService.defaultUsesRelaxedVoiceDetection)
+        XCTAssertTrue(LocalWhisperSubtitleService.previewUsesRelaxedVoiceDetection)
+    }
+
     func testTranslationJSONIsReorderedByIndex() throws {
         let content = """
         ```json
