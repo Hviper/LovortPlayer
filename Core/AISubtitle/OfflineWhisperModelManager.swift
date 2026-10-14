@@ -386,7 +386,7 @@ public final class OfflineWhisperModelManager: ObservableObject {
         saveRecords()
     }
 
-    static func downloadMetrics(fraction: Double, model: OfflineWhisperModel) -> OfflineModelDownloadMetrics {
+    nonisolated static func downloadMetrics(fraction: Double, model: OfflineWhisperModel) -> OfflineModelDownloadMetrics {
         let normalized = fraction.isFinite ? min(1, max(0, fraction)) : 0
         return OfflineModelDownloadMetrics(
             fraction: normalized,
@@ -395,11 +395,11 @@ public final class OfflineWhisperModelManager: ObservableObject {
         )
     }
 
-    static func modelFolderName(_ folderName: String, matches model: OfflineWhisperModel) -> Bool {
+    nonisolated static func modelFolderName(_ folderName: String, matches model: OfflineWhisperModel) -> Bool {
         folderName == model.rawValue || folderName == "openai_whisper-\(model.rawValue)"
     }
 
-    static func containsRequiredModelComponents(fileNames: [String]) -> Bool {
+    nonisolated static func containsRequiredModelComponents(fileNames: [String]) -> Bool {
         let requiredPrefixes = ["MelSpectrogram.", "AudioEncoder.", "TextDecoder."]
         return requiredPrefixes.allSatisfy { prefix in
             fileNames.contains { $0.hasPrefix(prefix) }
