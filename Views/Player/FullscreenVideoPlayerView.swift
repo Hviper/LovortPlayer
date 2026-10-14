@@ -477,12 +477,16 @@ public struct FullscreenVideoPlayerView: View {
                 UIScreen.main.brightness = newBrightness
                 showGestureHUD(icon: "sun.max.fill", text: "\(Int(newBrightness * 100))%", autoDismiss: false)
             } else {
-                // 右半屏调系统硬件音量
+                // 右半屏调系统硬件音量与播放器音量
                 let currentVol = SystemVolumeController.shared.getCurrentVolume()
                 let delta = Float(-translation.height / 8000.0)
                 let newVol = max(0.0, min(1.0, currentVol + delta))
                 SystemVolumeController.shared.setVolume(newVol)
-                showGestureHUD(icon: "speaker.wave.3.fill", text: "\(Int(newVol * 100))%", autoDismiss: false)
+                viewModel.volume = newVol
+                viewModel.player?.volume = newVol
+                viewModel.player?.isMuted = false
+                let icon = newVol <= 0.01 ? "speaker.slash.fill" : (newVol < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
+                showGestureHUD(icon: icon, text: "\(Int(newVol * 100))%", autoDismiss: false)
             }
         }
     }

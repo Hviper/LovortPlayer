@@ -32,7 +32,14 @@ public final class PlayerViewModel: ObservableObject {
 
     // 手势与 HUD 控制
     @Published public var showControls: Bool = true
-    @Published public var volume: Float = 1.0
+    @Published public var volume: Float = 1.0 {
+        didSet {
+            player?.volume = volume
+            if volume > 0 && player?.isMuted == true {
+                player?.isMuted = false
+            }
+        }
+    }
     @Published public var brightness: CGFloat = 0.5
     @Published public var isScrubbing: Bool = false
     @Published public var scrubPreviewTime: TimeInterval = 0
@@ -81,10 +88,25 @@ public final class PlayerViewModel: ObservableObject {
         self.currentVideoIsPrivate = isPrivate
         resetControlsTimeout()
 
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+            try session.setActive(true)
+        } catch {
+            print("Failed to activate AVAudioSession in loadVideo: \(error)")
+        }
+        #endif
+
         // 应用设置中的默认音量
         if AppSettings.shared.useDefaultVolume {
             self.volume = AppSettings.shared.defaultVolume
             SystemVolumeController.shared.setVolume(AppSettings.shared.defaultVolume)
+        } else {
+            #if os(iOS)
+            let sysVol = SystemVolumeController.shared.getCurrentVolume()
+            self.volume = sysVol > 0 ? sysVol : 1.0
+            #endif
         }
 
         // 尝试自动载入字幕
@@ -134,14 +156,17 @@ public final class PlayerViewModel: ObservableObject {
                         }
                     }
                     let audioItem = AVPlayerItem(asset: composition)
-                    self.player = AVPlayer(playerItem: audioItem)
+                    let p = AVPlayer(playerItem: audioItem)
+                    p.volume = self.volume
+                    p.isMuted = false
+                    self.player = p
                     if startPos > 0 {
                         let cmTime = CMTime(seconds: startPos, preferredTimescale: 600)
-                        await self.player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                        await p.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
                     }
                     if self.isPlaying {
-                        self.player?.play()
-                        self.player?.rate = self.playbackRate
+                        p.play()
+                        p.rate = self.playbackRate
                     }
                 }
             }
@@ -153,7 +178,10 @@ public final class PlayerViewModel: ObservableObject {
         // 2. 标准 H.264 / HEVC 原生硬解流程
         self.isAV1SoftwareMode = false
         let playerItem = AVPlayerItem(url: url)
-        self.player = AVPlayer(playerItem: playerItem)
+        let nativePlayer = AVPlayer(playerItem: playerItem)
+        nativePlayer.volume = self.volume
+        nativePlayer.isMuted = false
+        self.player = nativePlayer
         setupTimeObserver()
 
         Task {
@@ -289,6 +317,11 @@ public final class PlayerViewModel: ObservableObject {
             player?.pause()
             isPlaying = false
         } else {
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            #endif
+            player?.volume = volume
+            player?.isMuted = false
             player?.play()
             player?.rate = playbackRate
             isPlaying = true
