@@ -98,7 +98,12 @@ public actor LocalWhisperSubtitleService {
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> Void)? = nil
     ) async throws -> [SubtitleLine] {
         if pipeline == nil || loadedModel != model {
-            onProgress?("正在准备离线模型（首次使用需联网下载 \(model.displayName)）...")
+            let alreadyInstalled = await OfflineWhisperModelManager.shared.installedFolder(for: model) != nil
+            if alreadyInstalled {
+                onProgress?("正在加载离线模型 \(model.displayName)...")
+            } else {
+                onProgress?("正在准备离线模型（首次使用需联网下载 \(model.displayName)）...")
+            }
             let modelFolder = try await OfflineWhisperModelManager.shared.prepare(model)
             try Task.checkCancellation()
             pipeline = try await WhisperKit(

@@ -91,9 +91,28 @@ public final class OfflineWhisperModelManager: ObservableObject {
 
     public func installedFolder(for model: OfflineWhisperModel) -> URL? {
         let record = record(for: model)
-        guard record.state == .installed, let path = record.folderPath else { return nil }
-        let url = URL(fileURLWithPath: path, isDirectory: true)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        // 1. 先检查记录中存储的路径是否仍然有效
+        if record.state == .installed, let path = record.folderPath {
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            if isUsableModelFolder(url) {
+                return url
+            }
+            // 存储路径失效（如沙盒重建/应用更新），尝试修复
+        }
+        // 2. 对磁盘做一次扫描，看模型是否以不同路径存在
+        if let discovered = discoverInstalledFolder(for: model) {
+            // 修复记录，避免下次再触发不必要的重下载
+            update(model) { rec in
+                rec.state = .installed
+                rec.progress = 1
+                rec.folderPath = discovered.path
+                rec.completedBytes = self.directorySize(discovered)
+                rec.totalBytes = max(rec.completedBytes, rec.totalBytes)
+                rec.errorMessage = nil
+            }
+            return discovered
+        }
+        return nil
     }
 
     public func beginDownload(_ model: OfflineWhisperModel) {
