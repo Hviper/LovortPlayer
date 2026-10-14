@@ -39,3 +39,15 @@
 成功显示耗时及模型，失败提示鉴权、模型/地址、额度、网络或格式问题；不显示服务返回的原始错误正文。修改草稿、取消测试或离开页面会取消请求并丢弃旧结果。测试请求使用 30 秒请求/45 秒资源超时，火山 AK/SK 的换取临时凭证与翻译分别发出请求。真实 API 测试可能产生少量调用费用。
 
 连接测试新增 4 个回归场景：指定 GPT 模型、不可用模型不得回退、空凭证/空结果与错误隐私、自定义草稿请求不落盘。
+
+## 火山机器翻译（TranslateText）
+
+这是独立于“火山方舟 AI 翻译”的传统文本翻译服务。在设置 → 翻译 API 管理中选择“火山机器翻译”，填写火山引擎 Access Key ID 和 Secret Access Key，先测试连接，再保存。无需配置 URL、模型或 ep- 接入点。请在火山引擎控制台开通机器翻译服务并为密钥授予调用权限。机器翻译与方舟凭证分别保存在钥匙串中，不自动复制。
+
+固定官方地址 `https://translate.volcengineapi.com/?Action=TranslateText&Version=2020-06-01`，HMAC-SHA256 签名范围为 `cn-north-1/translate/request`。直接发送 `TextList`、`TargetLanguage` 和可选 `SourceLanguage`，读取 `TranslationList[].Translation`；自动检测源语言时不发送 SourceLanguage。每批不超过 16 条、总计 5000 字符，以 UTF-16 长度保守检查；单条超限明确报错，不截断字幕。保留字幕 ID、时间戳与原文，鉴权失败、HTTP 200 中的业务错误、缺失或空译文均作为失败。错误消息不回显服务端正文。
+
+机器翻译模式空 AK/SK 回退系统翻译；只填其中一个会提示补全，测试不回退系统。选定机器翻译后，已有方舟缓存不会被视为相同服务。播放器中可选的“GPT 影视语境精修”是独立开关，如需完全使用机器翻译，请保持关闭。
+
+官方资料：[文本翻译 API](https://docs.volcengine.com/docs/MachineTranslation/TextTranslationAPI?lang=zh)、[语言支持](https://docs.volcengine.com/docs/MachineTranslation/Languagesupport?lang=zh)。
+
+新增 4 个机器翻译回归场景：固定地址/签名向量/语言代码、16 条与 5000 字符批次限制、真实 Provider 与连接测试路由及原字幕保留、业务错误/空译文/不完整凭证的失败与隐私。合计 19 个原生回归场景，网络以 URLProtocol 模拟，不使用用户真实密钥。

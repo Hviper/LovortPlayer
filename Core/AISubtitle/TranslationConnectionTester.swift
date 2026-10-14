@@ -37,6 +37,8 @@ public enum TranslationConnectionTester {
             }
             // The Cloud service retains the same proxy settings as real GPT requests.
             return try await CloudAISubtitleService(apiKey: key, session: session).testConnection(model: configuration.openAIModel)
+        } else if settings.provider == .volcengineMachineTranslation {
+            service = VolcengineMachineTranslationProvider(credentials: configuration.accessCredentials, session: testSession)
         } else if settings.provider == .volcengine && settings.authenticationMode == .accessKey {
             try VolcengineAccessKeyTranslationProvider.validate(credentials: configuration.accessCredentials, endpointID: settings.model)
             service = VolcengineAccessKeyTranslationProvider(settings: settings, credentials: configuration.accessCredentials, session: testSession)
@@ -66,7 +68,7 @@ public enum TranslationConnectionTester {
         if error.domain == NSURLErrorDomain {
             return error.code == NSURLErrorTimedOut ? "请求超时，请检查网络、代理或服务状态" : "网络连接失败，请检查网络、代理和服务地址"
         }
-        if error.domain == "TranslationConnectionTest" || error.domain == "TranslationConfiguration" {
+        if error.domain == "TranslationConnectionTest" || error.domain == "TranslationConfiguration" || error.domain == "VolcengineMachineTranslation" {
             return error.localizedDescription
         }
         let status = error.domain == "OpenAIServiceError" ? error.code : httpStatus(in: error.localizedDescription)

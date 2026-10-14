@@ -554,7 +554,7 @@ public struct AISubtitleSettingsSheet: View {
                 Label("语言包准备完成后，翻译在设备端进行，不上传字幕文本。", systemImage: "iphone.and.arrow.forward")
                     .font(.system(size: 11))
                     .foregroundColor(.green.opacity(0.85))
-            } else if selectedTranslationProvider.usesChatCompletions {
+            } else if selectedTranslationProvider.usesChatCompletions || selectedTranslationProvider == .volcengineMachineTranslation {
                 NavigationLink("管理翻译服务与凭证") {
                     TranslationAPIManagementView()
                 }

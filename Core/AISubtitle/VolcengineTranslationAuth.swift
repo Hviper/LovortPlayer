@@ -17,15 +17,15 @@ public struct VolcengineAccessCredentials: Sendable, Equatable {
     }
     public var isEmpty: Bool { accessKeyID.isEmpty && secretAccessKey.isEmpty }
     public var isComplete: Bool { !accessKeyID.isEmpty && !secretAccessKey.isEmpty }
-    public static func saved() -> Self {
+    public static func saved(for provider: SubtitleTranslationProviderType = .volcengine) -> Self {
         let store = TranslationCredentialStore.shared
-        return Self(accessKeyID: store.value(for: .volcengine, field: "accessKeyID"),
-                    secretAccessKey: store.value(for: .volcengine, field: "secretAccessKey"))
+        return Self(accessKeyID: store.value(for: provider, field: "accessKeyID"),
+                    secretAccessKey: store.value(for: provider, field: "secretAccessKey"))
     }
-    public func save() {
+    public func save(for provider: SubtitleTranslationProviderType = .volcengine) {
         let store = TranslationCredentialStore.shared
-        store.setValue(accessKeyID, for: .volcengine, field: "accessKeyID")
-        store.setValue(secretAccessKey, for: .volcengine, field: "secretAccessKey")
+        store.setValue(accessKeyID, for: provider, field: "accessKeyID")
+        store.setValue(secretAccessKey, for: provider, field: "secretAccessKey")
     }
 }
 
@@ -74,28 +74,8 @@ public struct VolcengineAccessKeyTranslationProvider: SubtitleTranslationProvidi
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "DurationSeconds": 86_400, "ResourceType": "endpoint", "ResourceIds": [endpoint]
         ], options: [.sortedKeys, .withoutEscapingSlashes])
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        let timestamp = formatter.string(from: date)
-        let bodyHash = hex(SHA256.hash(data: request.httpBody!))
-        let host = "ark.cn-beijing.volcengineapi.com"
-        let signedHeaders = "content-type;host;x-content-sha256;x-date"
-        let canonicalHeaders = "content-type:application/json\nhost:\(host)\nx-content-sha256:\(bodyHash)\nx-date:\(timestamp)\n"
-        let canonical = ["POST", "/", "Action=GetApiKey&Version=2024-01-01", canonicalHeaders, signedHeaders, bodyHash].joined(separator: "\n")
-        let day = String(timestamp.prefix(8))
-        let scope = "\(day)/cn-beijing/ark/request"
-        let toSign = ["HMAC-SHA256", timestamp, scope, hex(SHA256.hash(data: Data(canonical.utf8)))].joined(separator: "\n")
-        var signingKey = Data(credentials.secretAccessKey.utf8)
-        for value in [day, "cn-beijing", "ark", "request"] { signingKey = hmac(key: signingKey, text: value) }
-        let signature = hex(hmac(key: signingKey, text: toSign))
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(host, forHTTPHeaderField: "Host")
-        request.setValue(timestamp, forHTTPHeaderField: "X-Date")
-        request.setValue(bodyHash, forHTTPHeaderField: "X-Content-Sha256")
-        request.setValue("HMAC-SHA256 Credential=\(credentials.accessKeyID)/\(scope), SignedHeaders=\(signedHeaders), Signature=\(signature)", forHTTPHeaderField: "Authorization")
-        return request
+        return VolcengineRequestSigner.sign(request, credentials: credentials,
+                                            region: "cn-beijing", service: "ark", date: date)
     }
 
     public static func validate(credentials: VolcengineAccessCredentials, endpointID: String) throws {
@@ -106,13 +86,43 @@ public struct VolcengineAccessKeyTranslationProvider: SubtitleTranslationProvidi
         }
     }
 
+    private static func authError(_ message: String) -> NSError {
+        NSError(domain: "VolcengineTranslationAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// Shared official HMAC-SHA256 signing for the fixed Ark and machine-translation endpoints.
+enum VolcengineRequestSigner {
+    static func sign(_ unsignedRequest: URLRequest, credentials: VolcengineAccessCredentials,
+                     region: String, service: String, date: Date = Date()) -> URLRequest {
+        var request = unsignedRequest
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        let timestamp = formatter.string(from: date)
+        let bodyHash = hex(SHA256.hash(data: request.httpBody ?? Data()))
+        let host = request.url!.host!
+        let signedHeaders = "content-type;host;x-content-sha256;x-date"
+        let canonicalHeaders = "content-type:application/json\nhost:\(host)\nx-content-sha256:\(bodyHash)\nx-date:\(timestamp)\n"
+        let canonical = ["POST", "/", request.url!.query ?? "", canonicalHeaders, signedHeaders, bodyHash].joined(separator: "\n")
+        let day = String(timestamp.prefix(8))
+        let scope = "\(day)/\(region)/\(service)/request"
+        let toSign = ["HMAC-SHA256", timestamp, scope, hex(SHA256.hash(data: Data(canonical.utf8)))].joined(separator: "\n")
+        var signingKey = Data(credentials.secretAccessKey.utf8)
+        for value in [day, region, service, "request"] { signingKey = hmac(key: signingKey, text: value) }
+        let signature = hex(hmac(key: signingKey, text: toSign))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(host, forHTTPHeaderField: "Host")
+        request.setValue(timestamp, forHTTPHeaderField: "X-Date")
+        request.setValue(bodyHash, forHTTPHeaderField: "X-Content-Sha256")
+        request.setValue("HMAC-SHA256 Credential=\(credentials.accessKeyID)/\(scope), SignedHeaders=\(signedHeaders), Signature=\(signature)", forHTTPHeaderField: "Authorization")
+        return request
+    }
     private static func hmac(key: Data, text: String) -> Data {
         Data(HMAC<SHA256>.authenticationCode(for: Data(text.utf8), using: SymmetricKey(data: key)))
     }
     private static func hex<T: Sequence>(_ bytes: T) -> String where T.Element == UInt8 {
         bytes.map { String(format: "%02x", $0) }.joined()
-    }
-    private static func authError(_ message: String) -> NSError {
-        NSError(domain: "VolcengineTranslationAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

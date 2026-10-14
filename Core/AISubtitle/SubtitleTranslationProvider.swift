@@ -9,6 +9,7 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
     case azure
     case zhipu
     case volcengine
+    case volcengineMachineTranslation
     case customChat
 
     public var id: String { rawValue }
@@ -21,7 +22,8 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
         case .google: return "Google Cloud Translation"
         case .azure: return "Azure Translator"
         case .zhipu: return "智谱 AI"
-        case .volcengine: return "火山方舟"
+        case .volcengine: return "火山方舟 AI 翻译"
+        case .volcengineMachineTranslation: return "火山机器翻译"
         case .customChat: return "自定义兼容 API"
         }
     }
@@ -35,13 +37,14 @@ public enum SubtitleTranslationProviderType: String, CaseIterable, Codable, Iden
         case .azure: return "支持批量翻译、语言检测与企业区域端点"
         case .zhipu: return "官方地址已内置，填写 API Key 即可使用预设模型"
         case .volcengine: return "官方地址已内置，支持 API Key 或 AK / SK 鉴权"
+        case .volcengineMachineTranslation: return "火山引擎文本翻译 API，只需 AK / SK，无需模型或接入点"
         case .customChat: return "配置 URL、API Key 和模型，使用 Chat Completions 翻译"
         }
     }
 
     public var usesChatCompletions: Bool { [.zhipu, .volcengine, .customChat].contains(self) }
 
-    public var requiresAPIKey: Bool { self != .apple && self != .openAI }
+    public var requiresAPIKey: Bool { self != .apple && self != .openAI && self != .volcengineMachineTranslation }
 }
 
 public protocol SubtitleTranslationProviding: Sendable {
@@ -335,8 +338,13 @@ public struct TranslationAPISettings: Sendable, Equatable {
         return endpoint
     }
 
+    public var usesAccessKeyCredentials: Bool {
+        provider == .volcengineMachineTranslation || (provider == .volcengine && authenticationMode == .accessKey)
+    }
+
     public var cacheIdentity: String? {
-        provider.usesChatCompletions ? "\(provider.rawValue)|\((try? endpoint().absoluteString) ?? url)|\(model)|\(authenticationMode.rawValue)" : nil
+        if provider == .volcengineMachineTranslation { return "volcengineMachineTranslation|TranslateText|2020-06-01" }
+        return provider.usesChatCompletions ? "\(provider.rawValue)|\((try? endpoint().absoluteString) ?? url)|\(model)|\(authenticationMode.rawValue)" : nil
     }
 
     public static func effectiveProvider(_ provider: SubtitleTranslationProviderType, hasCredential: Bool) -> SubtitleTranslationProviderType {

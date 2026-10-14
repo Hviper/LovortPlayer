@@ -608,8 +608,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     }
 
     public func effectiveTranslationProvider(_ provider: SubtitleTranslationProviderType) -> SubtitleTranslationProviderType {
-        if provider == .volcengine, TranslationAPISettings(provider: provider).authenticationMode == .accessKey {
-            let credentials = VolcengineAccessCredentials.saved()
+        if TranslationAPISettings(provider: provider).usesAccessKeyCredentials {
+            let credentials = VolcengineAccessCredentials.saved(for: provider)
             return TranslationAPISettings.effectiveProvider(provider, hasCredential: !credentials.isEmpty)
         }
         let key = provider == .openAI ? getSavedOpenAIKey() : TranslationCredentialStore.shared.value(for: provider)
@@ -635,6 +635,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                 )
             }
             return OpenAITranslationProvider(token: platformKey)
+        case .volcengineMachineTranslation:
+            return VolcengineMachineTranslationProvider(credentials: .saved(for: .volcengineMachineTranslation))
         case .volcengine where configuration.authenticationMode == .accessKey:
             return VolcengineAccessKeyTranslationProvider(settings: configuration,
                 credentials: VolcengineAccessCredentials.saved())

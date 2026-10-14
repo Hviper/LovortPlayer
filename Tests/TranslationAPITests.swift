@@ -347,3 +347,121 @@ private final class ConnectionTestURLProtocol: URLProtocol, @unchecked Sendable 
     }
     override func stopLoading() {}
 }
+
+final class VolcengineMachineTranslationTests: XCTestCase {
+    func testMachineRequestUsesOfficialEndpointSignatureAndLanguageCodes() throws {
+        let credentials = VolcengineAccessCredentials(accessKeyID: "test-ak", secretAccessKey: "test-sk")
+        let lines = [SubtitleLine(startTime: 0, endTime: 1, originalText: "Hello.")]
+        let request = try VolcengineMachineTranslationProvider.translationRequest(credentials: credentials,
+            lines: lines, source: .english, target: "简体中文", date: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(request.url?.absoluteString, "https://translate.volcengineapi.com/?Action=TranslateText&Version=2020-06-01")
+        XCTAssertEqual(String(decoding: request.httpBody!, as: UTF8.self), "{\"SourceLanguage\":\"en\",\"TargetLanguage\":\"zh\",\"TextList\":[\"Hello.\"]}")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"),
+            "HMAC-SHA256 Credential=test-ak/19700101/cn-north-1/translate/request, SignedHeaders=content-type;host;x-content-sha256;x-date, Signature=7f7ed8753250f51f6efa2122117c0f0f74ffa782b91dd34e6bda033b0320ba29")
+        let automatic = try VolcengineMachineTranslationProvider.translationRequest(credentials: credentials,
+            lines: lines, source: .automatic, target: "中文 (繁體)")
+        let body = try JSONSerialization.jsonObject(with: automatic.httpBody!) as! [String: Any]
+        XCTAssertNil(body["SourceLanguage"])
+        XCTAssertEqual(body["TargetLanguage"] as? String, "zh-Hant")
+        XCTAssertFalse(SubtitleTranslationProviderType.volcengineMachineTranslation.usesChatCompletions)
+        XCTAssertTrue(TranslationAPISettings(provider: .volcengineMachineTranslation).usesAccessKeyCredentials)
+    }
+
+    func testMachineBatchesEnforceCountAndCharacterLimits() throws {
+        let lines = (0..<33).map { SubtitleLine(startTime: Double($0), endTime: Double($0+1), originalText: "Hello") }
+        XCTAssertEqual(try VolcengineMachineTranslationProvider.batches(lines).map(\.count), [16,16,1])
+        let longLines = (0..<3).map { SubtitleLine(startTime: Double($0), endTime: Double($0+1), originalText: String(repeating: "文", count: 2_000)) }
+        XCTAssertEqual(try VolcengineMachineTranslationProvider.batches(longLines).map(\.count), [2,1])
+        XCTAssertThrowsError(try VolcengineMachineTranslationProvider.batches([
+            SubtitleLine(startTime: 0, endTime: 1, originalText: String(repeating: "文", count: 5_001))]))
+    }
+
+    @MainActor
+    func testMachineTranslationAndConnectionTestPreserveSubtitles() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        let credentials = VolcengineAccessCredentials(accessKeyID: "test-ak", secretAccessKey: "test-sk")
+        let lines = (0..<17).map { SubtitleLine(startTime: Double($0), endTime: Double($0+1), originalText: "Hello.") }
+        let output = try await VolcengineMachineTranslationProvider(credentials: credentials, session: session)
+            .translate(lines: lines, sourceLanguage: .automatic, targetLanguage: "中文 (简体)", onProgress: nil)
+        XCTAssertEqual(output.map(\.id), lines.map(\.id))
+        XCTAssertEqual(output.map(\.startTime), lines.map(\.startTime))
+        XCTAssertEqual(output.map(\.endTime), lines.map(\.endTime))
+        XCTAssertEqual(output.map(\.originalText), lines.map(\.originalText))
+        XCTAssertTrue(output.allSatisfy { $0.translatedText == "你好" })
+        let value = try await TranslationConnectionTester.test(TranslationConnectionConfiguration(
+            settings: TranslationAPISettings(provider: .volcengineMachineTranslation), apiKey: "",
+            accessCredentials: credentials), session: session)
+        XCTAssertEqual(value, "你好")
+    }
+
+    @MainActor
+    func testMachineErrorsEmptyResultsAndIncompleteCredentialsFailPrivately() async {
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        let credentials = VolcengineAccessCredentials(accessKeyID: "test-ak", secretAccessKey: "test-sk")
+        for text in ["api-error", "http-error", "empty", "missing"] {
+            do {
+                _ = try await VolcengineMachineTranslationProvider(credentials: credentials, session: session).translate(
+                    lines: [SubtitleLine(startTime: 0, endTime: 1, originalText: text)],
+                    sourceLanguage: .english, targetLanguage: "简体中文", onProgress: nil)
+                XCTFail("Invalid response must fail")
+            } catch {
+                XCTAssertFalse(error.localizedDescription.contains("test-sk"))
+                XCTAssertFalse(TranslationConnectionTester.errorMessage(error).contains("echoed-body"))
+            }
+        }
+        do {
+            _ = try await TranslationConnectionTester.test(TranslationConnectionConfiguration(
+                settings: TranslationAPISettings(provider: .volcengineMachineTranslation), apiKey: "ignored",
+                accessCredentials: .init(accessKeyID: "", secretAccessKey: "test-sk")), session: session)
+            XCTFail("Both AK and SK are required; no fallback")
+        } catch {
+            XCTAssertTrue(TranslationConnectionTester.errorMessage(error).contains("完整"))
+        }
+    }
+
+    private func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MachineTranslationURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+}
+
+private final class MachineTranslationURLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+        }
+        guard request.url?.host == "translate.volcengineapi.com", request.url?.query == "Action=TranslateText&Version=2020-06-01",
+              request.httpMethod == "POST", (request.value(forHTTPHeaderField: "Authorization") ?? "").contains("cn-north-1/translate/request"),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let texts = body["TextList"] as? [String], !texts.isEmpty, texts.count <= 16,
+              texts.reduce(0, { $0 + $1.utf16.count }) <= 5_000, body["model"] == nil, body["messages"] == nil else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+        }
+        var root: [String: Any] = ["TranslationList": texts.map { _ in ["Translation": "你好"] }]
+        switch texts.first {
+        case "api-error": root = ["ResponseMetadata": ["Error": ["Code": "AccessDenied", "Message": "test-sk echoed-body"]]]
+        case "empty": root = ["TranslationList": [["Translation": " "]]]
+        case "missing": root = ["TranslationList": []]
+        default: break
+        }
+        let status = texts.first == "http-error" ? 403 : 200
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: root))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}

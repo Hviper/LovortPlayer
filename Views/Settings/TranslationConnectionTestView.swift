@@ -61,7 +61,8 @@ public struct TranslationConnectionTestView: View {
                 _ = try await TranslationConnectionTester.test(snapshot)
                 guard !Task.isCancelled, requestID == id else { return }
                 succeeded = true
-                let model = snapshot.settings.provider == .openAI ? snapshot.openAIModel : snapshot.settings.model
+                let model = snapshot.settings.provider == .openAI ? snapshot.openAIModel
+                    : snapshot.settings.provider.usesChatCompletions ? snapshot.settings.model : ""
                 message = "连接成功，已收到有效翻译（\(String(format: "%.1f", Date().timeIntervalSince(start))) 秒）" + (model.isEmpty ? "" : "\n模型：\(model)")
             } catch {
                 guard !Task.isCancelled, requestID == id else { return }

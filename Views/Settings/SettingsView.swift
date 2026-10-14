@@ -522,7 +522,7 @@ private struct TranslationAPICredentialEditor: View {
         _url = State(initialValue: configuration.url)
         _model = State(initialValue: configuration.model)
         _authenticationMode = State(initialValue: configuration.authenticationMode)
-        let accessCredentials = VolcengineAccessCredentials.saved()
+        let accessCredentials = VolcengineAccessCredentials.saved(for: provider)
         _accessKeyID = State(initialValue: accessCredentials.accessKeyID)
         _secretAccessKey = State(initialValue: accessCredentials.secretAccessKey)
         _apiKey = State(initialValue: provider == .openAI
@@ -555,7 +555,10 @@ private struct TranslationAPICredentialEditor: View {
                     .font(.footnote).foregroundStyle(.secondary)
                 DisclosureGroup("模型设置（已提供默认模型）") { modelField }
             }
-            if provider == .volcengine, authenticationMode == .accessKey {
+            if provider == .volcengineMachineTranslation {
+                Text("官方机器翻译地址已内置，无需模型或接入点").font(.footnote).foregroundStyle(.secondary)
+            }
+            if usesAccessKeyCredentials {
                 SecureField("Access Key ID", text: $accessKeyID).autocorrectionDisabled()
                 SecureField("Secret Access Key", text: $secretAccessKey).autocorrectionDisabled()
             } else {
@@ -574,6 +577,10 @@ private struct TranslationAPICredentialEditor: View {
         } footer: {
             Text(credentialHelp)
         }
+    }
+
+    private var usesAccessKeyCredentials: Bool {
+        provider == .volcengineMachineTranslation || (provider == .volcengine && authenticationMode == .accessKey)
     }
 
     private var testConfiguration: TranslationConnectionConfiguration {
@@ -597,6 +604,9 @@ private struct TranslationAPICredentialEditor: View {
     }
 
     private var credentialHelp: String {
+        if provider == .volcengineMachineTranslation {
+            return "火山引擎机器翻译（TranslateText）。官方地址已内置，只需填写 AK/SK，无需模型、接入点或 API Key。请先开通机器翻译服务并授予调用权限；清空 AK 和 SK 保存后使用系统翻译。"
+        }
         if provider == .zhipu {
             return "智谱使用单个 API Key，无需 AK / SK。已提供默认字幕翻译模型，可在模型设置中修改。"
         }
@@ -617,10 +627,10 @@ private struct TranslationAPICredentialEditor: View {
         configuration.authenticationMode = authenticationMode
         do {
             let accessCredentials = VolcengineAccessCredentials(accessKeyID: accessKeyID, secretAccessKey: secretAccessKey)
-            let usesAccessKey = provider == .volcengine && authenticationMode == .accessKey
+            let usesAccessKey = usesAccessKeyCredentials
             let hasCredential = usesAccessKey ? !accessCredentials.isEmpty
                 : !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if usesAccessKey, hasCredential {
+            if provider == .volcengine, usesAccessKey, hasCredential {
                 try VolcengineAccessKeyTranslationProvider.validate(credentials: accessCredentials, endpointID: model)
             }
             if provider.usesChatCompletions, hasCredential {
@@ -630,9 +640,13 @@ private struct TranslationAPICredentialEditor: View {
                     return
                 }
             }
+            if provider == .volcengineMachineTranslation, hasCredential, !accessCredentials.isComplete {
+                status = "请填写完整的 Access Key ID 和 Secret Access Key"
+                return
+            }
             configuration.save()
             if usesAccessKey {
-                accessCredentials.save()
+                accessCredentials.save(for: provider)
             } else if provider == .openAI {
                 AISubtitleCoordinator.shared.saveOpenAIKey(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
             } else {
