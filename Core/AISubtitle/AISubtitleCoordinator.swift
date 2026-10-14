@@ -18,6 +18,13 @@ public enum AISubtitleEngineType: String, CaseIterable, Codable, Identifiable, S
     }
 }
 
+public struct SubtitlePreviewResult: Sendable {
+    public let startTime: TimeInterval
+    public let endTime: TimeInterval
+    public let lines: [SubtitleLine]
+    public let translationWarning: String?
+}
+
 public final class AISubtitleCoordinator: @unchecked Sendable {
     public static let shared = AISubtitleCoordinator()
 
@@ -213,8 +220,16 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                   cachedDocument.sourceLanguage == sourceLanguage.rawValue,
                   cachedDocument.engine == selectedEngine,
                   cachedDocument.model == expectedModel else { return nil }
+            let keepTranslations = cachedDocument.translationProvider == selectedTranslationProvider
+                && cachedDocument.targetLanguage == targetLanguage
             return cachedDocument.lines.map {
-                SubtitleLine(id: $0.id, startTime: $0.startTime, endTime: $0.endTime, originalText: $0.originalText)
+                SubtitleLine(
+                    id: $0.id,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    originalText: $0.originalText,
+                    translatedText: keepTranslations ? $0.translatedText : nil
+                )
             }
         }()
 
@@ -228,7 +243,25 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             return cachedDocument
         }()
 
+        let initialLines: [SubtitleLine] = {
+            guard let resumableDocument else { return [] }
+            let keepTranslations = resumableDocument.translationProvider == selectedTranslationProvider
+                && resumableDocument.targetLanguage == targetLanguage
+            if keepTranslations {
+                return resumableDocument.lines
+            } else {
+                return resumableDocument.lines.map {
+                    SubtitleLine(id: $0.id, startTime: $0.startTime, endTime: $0.endTime, originalText: $0.originalText)
+                }
+            }
+        }()
+
         let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+        let streamingTranslationService = try? await resolveTranslationService(
+            provider: selectedTranslationProvider,
+            platformKey: platformKey
+        )
+
         let originalLines: [SubtitleLine]
         if let reusableOriginalLines {
             originalLines = reusableOriginalLines
@@ -241,10 +274,31 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                     sourceLanguage: sourceLanguage,
                     model: selectedModel,
                     preferredStartTime: preferredStartTime,
-                    existingLines: resumableDocument?.lines ?? [],
+                    existingLines: initialLines,
                     completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
                     onProgress: onProgress,
                     onPartialResult: { [cacheStore] update in
+                        await onTranscriptionProgress?(update.completedChunkIndexes.count, update.totalChunkCount)
+                        if !update.lines.isEmpty {
+                            await onPartialResult?(update.lines)
+                        }
+                        guard !update.completedChunkIndexes.isEmpty else { return update.lines }
+                        var mergedLines = update.lines
+                        if let streamingTranslationService, !update.latestChunkLines.isEmpty {
+                            onProgress?("正在流式翻译第 \(update.completedChunkIndexes.count)/\(update.totalChunkCount) 个字幕分片 (\(update.latestChunkLines.count) 句)...")
+                            if let translatedChunk = try? await streamingTranslationService.translate(
+                                lines: update.latestChunkLines,
+                                sourceLanguage: sourceLanguage,
+                                targetLanguage: targetLanguage,
+                                onProgress: nil
+                            ) {
+                                let translatedByID = Dictionary(uniqueKeysWithValues: translatedChunk.map { ($0.id, $0) })
+                                mergedLines = mergedLines.map { line in
+                                    translatedByID[line.id] ?? line
+                                }
+                                await onPartialResult?(mergedLines)
+                            }
+                        }
                         let partialDocument = SubtitleDocument(
                             sourceLanguage: sourceLanguage.rawValue,
                             targetLanguage: targetLanguage,
@@ -257,11 +311,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             completedChunkIndexes: update.completedChunkIndexes,
                             chunkDuration: LocalWhisperSubtitleService.chunkDuration,
                             videoURL: videoURL,
-                            lines: update.lines
+                            lines: mergedLines
                         )
                         _ = try? cacheStore.save(partialDocument, for: videoURL)
-                        await onTranscriptionProgress?(update.completedChunkIndexes.count, update.totalChunkCount)
-                        await onPartialResult?(update.lines)
+                        return mergedLines
                     }
                 )
             case .cloudOpenAI:
@@ -324,28 +377,21 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         var translationComplete = false
         var gptEnhanced = false
         do {
-            let service: any SubtitleTranslationProviding
-            switch selectedTranslationProvider {
-            case .apple:
-                service = await AppleTranslationBridge.shared
-            case .openAI:
-                guard platformKey.hasPrefix("sk-") else { throw NSError(
-                    domain: "AISubtitleError",
-                    code: -13,
-                    userInfo: [NSLocalizedDescriptionKey: "GPT 翻译需要 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等同于 API 额度"]
-                ) }
-                service = OpenAITranslationProvider(token: platformKey)
-            case .deepL, .google, .azure:
-                let key = TranslationCredentialStore.shared.value(for: selectedTranslationProvider)
-                let region = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
-                service = RESTTranslationProvider(provider: selectedTranslationProvider, apiKey: key, azureRegion: region)
-            }
-            finalLines = try await service.translate(
-                lines: originalLines,
-                sourceLanguage: sourceLanguage,
-                targetLanguage: targetLanguage,
-                onProgress: onProgress
+            let service = try await resolveTranslationService(
+                provider: selectedTranslationProvider,
+                platformKey: platformKey
             )
+            let untranslatedLines = finalLines.filter { ($0.translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !untranslatedLines.isEmpty {
+                let translated = try await service.translate(
+                    lines: untranslatedLines,
+                    sourceLanguage: sourceLanguage,
+                    targetLanguage: targetLanguage,
+                    onProgress: onProgress
+                )
+                let translatedByID = Dictionary(uniqueKeysWithValues: translated.map { ($0.id, $0) })
+                finalLines = finalLines.map { translatedByID[$0.id] ?? $0 }
+            }
             translationComplete = true
             gptEnhanced = selectedTranslationProvider == .openAI
 
@@ -405,6 +451,120 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             onProgress?("✅ 已生成并保存双语字幕（共 \(finalLines.count) 句）")
         }
         return finalLines
+    }
+
+    /// Tries a short passage without creating a long-running task or writing subtitle cache.
+    public func previewLocalVideo(
+        videoURL: URL,
+        startTime: TimeInterval,
+        sourceLanguage: SubtitleSourceLanguage,
+        model: OfflineWhisperModel,
+        translationProvider: SubtitleTranslationProviderType,
+        targetLanguage: String,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> SubtitlePreviewResult {
+        guard await OfflineWhisperModelManager.shared.installedFolder(for: model) != nil else {
+            throw NSError(domain: "SubtitlePreview", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "请先在设置中安装所选离线模型"])
+        }
+        let hasActiveTask = await MainActor.run { SubtitleTaskManager.shared.activeTask != nil }
+        guard !hasActiveTask else {
+            throw NSError(domain: "SubtitlePreview", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "请等待当前字幕任务结束后再试预览"])
+        }
+
+        let asset = AVURLAsset(url: videoURL)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let track = tracks.first(where: { track in
+            let tag = (track.extendedLanguageTag ?? track.languageCode ?? "").lowercased()
+            return sourceLanguage.trackLanguageCandidates.contains { tag == $0 || tag.hasPrefix("\($0)-") }
+        }) ?? tracks.first else {
+            throw NSError(domain: "SubtitlePreview", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "视频没有可用音轨"])
+        }
+        let duration = CMTimeGetSeconds(try await asset.load(.duration))
+        guard duration.isFinite, duration > 0 else {
+            throw NSError(domain: "SubtitlePreview", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "无法读取视频时长"])
+        }
+        let begin = min(max(0, startTime), max(0, duration - 30))
+        let length = min(30, duration - begin)
+        let composition = AVMutableComposition()
+        guard let compositionTrack = composition.addMutableTrack(
+            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw NSError(domain: "SubtitlePreview", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey: "无法创建预览音轨"])
+        }
+        let trackRange = try await track.load(.timeRange)
+        try compositionTrack.insertTimeRange(trackRange, of: track, at: .zero)
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(domain: "SubtitlePreview", code: -6,
+                          userInfo: [NSLocalizedDescriptionKey: "无法导出预览音频"])
+        }
+        let clipURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lovort-preview-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+        exporter.outputURL = clipURL
+        exporter.outputFileType = .m4a
+        exporter.timeRange = CMTimeRange(
+            start: CMTime(seconds: begin, preferredTimescale: 600),
+            duration: CMTime(seconds: length, preferredTimescale: 600)
+        )
+        onProgress?("正在提取 30 秒预览音频…")
+        await exporter.export()
+        guard exporter.status == .completed else {
+            throw exporter.error ?? NSError(domain: "SubtitlePreview", code: -7,
+                                            userInfo: [NSLocalizedDescriptionKey: "预览音频导出失败"])
+        }
+        try Task.checkCancellation()
+        let sourceLines = try await localService.transcribe(
+            audioURL: clipURL, sourceLanguage: sourceLanguage, model: model,
+            onProgress: onProgress
+        ).map { line in
+            SubtitleLine(id: line.id, startTime: line.startTime + begin,
+                         endTime: line.endTime + begin, originalText: line.originalText)
+        }
+        var resultLines = sourceLines
+        var warning: String?
+        do {
+            let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+            let service = try await resolveTranslationService(provider: translationProvider, platformKey: platformKey)
+            resultLines = try await service.translate(
+                lines: sourceLines, sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage, onProgress: onProgress
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            warning = "翻译预览未完成：\(error.localizedDescription)"
+        }
+        try Task.checkCancellation()
+        return SubtitlePreviewResult(startTime: begin, endTime: begin + length,
+                                     lines: resultLines, translationWarning: warning)
+    }
+
+    private func resolveTranslationService(
+        provider: SubtitleTranslationProviderType,
+        platformKey: String
+    ) async throws -> any SubtitleTranslationProviding {
+        switch provider {
+        case .apple:
+            return await AppleTranslationBridge.shared
+        case .openAI:
+            guard platformKey.hasPrefix("sk-") else {
+                throw NSError(
+                    domain: "AISubtitleError",
+                    code: -13,
+                    userInfo: [NSLocalizedDescriptionKey: "GPT 翻译需要 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等同于 API 额度"]
+                )
+            }
+            return OpenAITranslationProvider(token: platformKey)
+        case .deepL, .google, .azure:
+            let key = TranslationCredentialStore.shared.value(for: provider)
+            let region = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
+            return RESTTranslationProvider(provider: provider, apiKey: key, azureRegion: region)
+        }
     }
 
     private func saveSRTBestEffort(lines: [SubtitleLine], videoURL: URL, suffix: String?) {

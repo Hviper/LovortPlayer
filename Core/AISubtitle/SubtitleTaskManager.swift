@@ -396,33 +396,44 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     private func applyTranscriptionProgress(completed: Int, total: Int, to id: UUID, runToken: UUID) {
-        guard runningTaskID == id, runTokens[id] == runToken,
-              tasks.first(where: { $0.id == id })?.phase.isActive == true else { return }
+        guard runningTaskID == id, runTokens[id] == runToken, tasks.first(where: { $0.id == id })?.phase.isActive == true else { return }
         update(id) { item in
             item.phase = .transcribing
             item.completedChunks = completed
             item.totalChunks = total
             item.transcriptionProgress = total > 0 ? Double(completed) / Double(total) : 0
-            item.statusText = "正在生成原文字幕 · \(completed)/\(total) 个分片"
+            if completed > 0 {
+                item.statusText = "正在生成双语字幕 · 已完成 \(completed)/\(total) 个分片"
+            } else {
+                item.statusText = "准备识别 · 共 \(total) 个分片"
+            }
         }
     }
 
     private func applyPartialLines(_ lines: [SubtitleLine], to id: UUID, runToken: UUID) {
-        guard runningTaskID == id, runTokens[id] == runToken,
-              let item = tasks.first(where: { $0.id == id }), item.phase.isActive else { return }
+        guard runningTaskID == id, runTokens[id] == runToken, let item = tasks.first(where: { $0.id == id }), item.phase.isActive else { return }
         liveSubtitles[videoKey(item.videoURL)] = lines
-        update(id) { value in value.lineCount = lines.count }
+        let translatedCount = lines.filter { !($0.translatedText ?? "").isEmpty }.count
+        update(id) { value in
+            value.lineCount = lines.count
+            if !lines.isEmpty, translatedCount > 0 {
+                let chunkRatio = value.totalChunks > 0 ? Double(value.completedChunks) / Double(value.totalChunks) : value.transcriptionProgress
+                let translatedRatio = Double(translatedCount) / Double(lines.count)
+                value.translationProgress = max(value.translationProgress, min(1.0, chunkRatio * translatedRatio))
+            }
+        }
     }
 
     private func applyStatus(_ status: String, to id: UUID, runToken: UUID) {
-        guard runningTaskID == id, runTokens[id] == runToken,
-              let index = index(of: id), tasks[index].phase.isActive else { return }
+        guard runningTaskID == id, runTokens[id] == runToken, let index = index(of: id), tasks[index].phase.isActive else { return }
         let oldPhase = tasks[index].phase
         tasks[index].statusText = status
-        if status.contains("准备离线模型") {
+        if status.contains("准备离线模型") || status.contains("加载离线模型") {
             tasks[index].phase = .waitingForModel
         } else if status.contains("提取") || status.contains("音轨") {
             tasks[index].phase = .preparingAudio
+        } else if status.contains("流式翻译") {
+            tasks[index].phase = .transcribing
         } else if status.contains("翻译") || status.contains("精修") {
             tasks[index].phase = .translating
             if let fraction = fraction(in: status) {
@@ -433,13 +444,18 @@ public final class SubtitleTaskManager: ObservableObject {
         } else if status.contains("字幕分片") || status.contains("转写") || status.contains("识别") {
             tasks[index].phase = .transcribing
             if let fraction = fraction(in: status) {
-                tasks[index].completedChunks = fraction.current
-                tasks[index].totalChunks = fraction.total
-                tasks[index].transcriptionProgress = Double(fraction.current) / Double(fraction.total)
+                tasks[index].totalChunks = max(tasks[index].totalChunks, fraction.total)
+                let completedBeforeCurrent = max(0, fraction.current - 1)
+                if tasks[index].completedChunks < completedBeforeCurrent {
+                    tasks[index].completedChunks = completedBeforeCurrent
+                    tasks[index].transcriptionProgress = Double(completedBeforeCurrent) / Double(fraction.total)
+                }
             }
         }
         tasks[index].updatedAt = Date()
-        if tasks[index].phase != oldPhase || fraction(in: status) != nil { saveTasks() }
+        if tasks[index].phase != oldPhase {
+            saveTasks()
+        }
     }
 
     private func fraction(in text: String) -> (current: Int, total: Int)? {
