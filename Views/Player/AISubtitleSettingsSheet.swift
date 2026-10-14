@@ -2,7 +2,6 @@ import SwiftUI
 
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
-    @StateObject private var authManager = AuthManager.shared
     @ObservedObject private var modelManager = AIModelManager.shared
     @Environment(\.dismiss) private var dismiss
 
@@ -17,8 +16,6 @@ public struct AISubtitleSettingsSheet: View {
     @State private var enhanceWithGPT: Bool = AISubtitleCoordinator.shared.isGPTEnhancementEnabled
     @State private var translationAPIKey: String = ""
     @State private var azureRegion: String = ""
-    @State private var isLoggingIn: Bool = false
-    @State private var loginMessage: String? = nil
     @State private var communityMatchStatus: String = ""
     @State private var showCustomModelSheet: Bool = false
     @State private var customModelText: String = ""
@@ -92,109 +89,7 @@ public struct AISubtitleSettingsSheet: View {
         }
     }
 
-    // MARK: - 1. 账号授权与当前额度
-    private var subscriptionSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("ChatGPT 订阅与 AI 额度")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.6))
-                Spacer()
-                if let profile = authManager.currentProfile, profile.isLoggedIn, profile.canUseChatGPTPlan {
-                    HStack(spacing: 4) {
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
-                        Text("已认证")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.green)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.green.opacity(0.12)))
-                }
-            }
-
-            if let profile = authManager.currentProfile, profile.isLoggedIn, profile.canUseChatGPTPlan {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(profile.email)
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundColor(.white)
-                            Text("ChatGPT 计划使用权限已启用")
-                                .font(.system(size: 12))
-                                .foregroundColor(AppSettings.shared.themeColor.color)
-                        }
-                        Spacer()
-                        Button(action: { authManager.logout() }) {
-                            Text("退出登录")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.white.opacity(0.6))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Color.white.opacity(0.08)))
-                        }
-                    }
-
-                    Divider().background(Color.white.opacity(0.08))
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .font(.system(size: 11))
-                                .foregroundColor(.green)
-                            Text("当前额度：已绑定 GPT-4o / Codex 高速大模型通道")
-                                .font(.system(size: 12))
-                                .foregroundColor(.white.opacity(0.85))
-                        }
-                        HStack(spacing: 6) {
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 11))
-                                .foregroundColor(.yellow)
-                            Text("ChatGPT 仅用于联网翻译；原文转写可由 WhisperKit 完全离线完成")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.55))
-                        }
-                    }
-                }
-            } else {
-                VStack(spacing: 12) {
-                    Text("连接符合条件的 ChatGPT Plus / Pro 账户并授权计划使用后，可将设备端生成的原文字幕联网翻译为双语字幕。")
-                        .font(.system(size: 12))
-                        .foregroundColor(.white.opacity(0.6))
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Button(action: { startSystemWebLogin(provider: .chatgpt) }) {
-                        HStack {
-                            if isLoggingIn {
-                                ProgressView().tint(.white).padding(.trailing, 4)
-                            } else {
-                                Image(systemName: "safari.fill")
-                            }
-                            Text("使用 ChatGPT 继续")
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.12)))
-                    }
-                }
-            }
-
-            if let msg = loginMessage {
-                Text(msg)
-                    .font(.system(size: 12))
-                    .foregroundColor(.green)
-            }
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.white.opacity(0.06))
-        )
-    }
-
-    // MARK: - 2. 当前大模型 (可自由切换)
+    // MARK: - 1. 当前大模型 (可自由切换)
     private var modelSelectionSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -302,7 +197,7 @@ public struct AISubtitleSettingsSheet: View {
         )
     }
 
-    // MARK: - 3. 视频字幕获取（社区精校匹配 + AI 离线生成）
+    // MARK: - 2. 视频字幕获取（社区精校匹配 + AI 离线生成）
     private var offlineGenerationSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("字幕获取与智能生成")
@@ -575,7 +470,7 @@ public struct AISubtitleSettingsSheet: View {
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.06)))
     }
 
-    // MARK: - 4. 画面字幕浮层跟随显示
+    // MARK: - 3. 画面字幕浮层跟随显示
     private var displayToggleSection: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -598,7 +493,7 @@ public struct AISubtitleSettingsSheet: View {
         )
     }
 
-    // MARK: - 5. 网络代理设置
+    // MARK: - 4. 网络代理设置
     private var proxySettingsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("网络代理设置 (Clash / 本地代理)")
@@ -633,7 +528,7 @@ public struct AISubtitleSettingsSheet: View {
         )
     }
 
-    // MARK: - 6. 手动 API Key (备用方式)
+    // MARK: - 5. 手动 API Key (备用方式)
     private var manualApiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("OpenAI Platform API Key")
@@ -662,23 +557,6 @@ public struct AISubtitleSettingsSheet: View {
             UserDefaults.standard.set(p, forKey: "LovortCustomProxyPort")
         } else {
             UserDefaults.standard.removeObject(forKey: "LovortCustomProxyPort")
-        }
-    }
-
-    private func startSystemWebLogin(provider: AuthProvider) {
-        Task {
-            isLoggingIn = true
-            do {
-                _ = try await authManager.startWebAuthLogin(provider: provider)
-                withAnimation {
-                    loginMessage = "已通过系统 Safari 认证！"
-                }
-            } catch {
-                withAnimation {
-                    loginMessage = "登录未完成: \(error.localizedDescription)"
-                }
-            }
-            isLoggingIn = false
         }
     }
 

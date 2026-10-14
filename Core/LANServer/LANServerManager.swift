@@ -82,29 +82,30 @@ public final class LANServerManager: ObservableObject, @unchecked Sendable {
     }
 
     public func getLocalIPAddress() -> String? {
-        var address: String?
+        var candidates: [(name: String, address: String)] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return nil }
         defer { freeifaddrs(ifaddr) }
 
         for pointer in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = pointer.pointee
-            guard interface.ifa_addr.pointee.sa_family == UInt8(AF_INET),
-                  String(cString: interface.ifa_name) == "en0" else { continue }
+            guard let socketAddress = interface.ifa_addr,
+                  socketAddress.pointee.sa_family == UInt8(AF_INET),
+                  (interface.ifa_flags & UInt32(IFF_UP)) != 0,
+                  (interface.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(
-                interface.ifa_addr,
-                socklen_t(interface.ifa_addr.pointee.sa_len),
+            guard getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
                 &hostname,
                 socklen_t(hostname.count),
                 nil,
                 0,
                 NI_NUMERICHOST
-            )
-            address = String(cString: hostname)
-            break
+            ) == 0 else { continue }
+            candidates.append((String(cString: interface.ifa_name), String(cString: hostname)))
         }
-        return address
+        return candidates.first(where: { $0.name == "en0" })?.address ?? candidates.first?.address
     }
 }
 
