@@ -2,6 +2,40 @@ import Combine
 import Foundation
 import WhisperKit
 
+private final class ModelPreparationWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var result: Result<URL, Error>?
+
+    func install(_ continuation: CheckedContinuation<URL, Error>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func finish(_ result: Result<URL, Error>) {
+        lock.lock()
+        if self.result != nil {
+            lock.unlock()
+            return
+        }
+        if let continuation {
+            self.continuation = nil
+            self.result = result
+            lock.unlock()
+            continuation.resume(with: result)
+        } else {
+            self.result = result
+            lock.unlock()
+        }
+    }
+}
+
 public enum OfflineModelInstallState: String, Codable, Sendable {
     case notInstalled
     case downloading
@@ -67,7 +101,7 @@ public final class OfflineWhisperModelManager: ObservableObject {
 
     public func prepare(_ model: OfflineWhisperModel) async throws -> URL {
         if let installed = installedFolder(for: model) { return installed }
-        if let existing = preparationTasks[model] { return try await existing.value }
+        if let existing = preparationTasks[model] { return try await waitForPreparation(existing) }
 
         try FileManager.default.createDirectory(at: Self.modelsDirectory, withIntermediateDirectories: true)
         update(model) { record in
@@ -78,48 +112,49 @@ public final class OfflineWhisperModelManager: ObservableObject {
             record.errorMessage = nil
         }
 
-        let task = Task<URL, Error> {
-            try await WhisperKit.download(
-                variant: model.rawValue,
-                downloadBase: Self.modelsDirectory,
-                useBackgroundSession: true,
-                progressCallback: { [weak self] progress in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        self.update(model) { record in
-                            record.state = .downloading
-                            record.progress = progress.fractionCompleted.isFinite
-                                ? min(1, max(0, progress.fractionCompleted))
-                                : record.progress
-                            record.completedBytes = progress.completedUnitCount
-                            if progress.totalUnitCount > 0 { record.totalBytes = progress.totalUnitCount }
+        let task = Task<URL, Error> { [weak self] in
+            do {
+                let folder = try await WhisperKit.download(
+                    variant: model.rawValue,
+                    downloadBase: Self.modelsDirectory,
+                    useBackgroundSession: true,
+                    progressCallback: { [weak self] progress in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.update(model) { record in
+                                record.state = .downloading
+                                record.progress = progress.fractionCompleted.isFinite
+                                    ? min(1, max(0, progress.fractionCompleted))
+                                    : record.progress
+                                record.completedBytes = progress.completedUnitCount
+                                if progress.totalUnitCount > 0 { record.totalBytes = progress.totalUnitCount }
+                            }
                         }
                     }
+                )
+                self?.update(model) { record in
+                    record.state = .installed
+                    record.progress = 1
+                    record.completedBytes = self?.directorySize(folder) ?? record.completedBytes
+                    record.totalBytes = max(record.completedBytes, record.totalBytes)
+                    record.folderPath = folder.path
+                    record.errorMessage = nil
                 }
-            )
+                return folder
+            } catch {
+                self?.update(model) { record in
+                    record.state = .failed
+                    record.errorMessage = error.localizedDescription
+                }
+                throw error
+            }
         }
         preparationTasks[model] = task
-
-        do {
-            let folder = try await task.value
-            preparationTasks[model] = nil
-            update(model) { record in
-                record.state = .installed
-                record.progress = 1
-                record.completedBytes = directorySize(folder)
-                record.totalBytes = max(record.completedBytes, record.totalBytes)
-                record.folderPath = folder.path
-                record.errorMessage = nil
-            }
-            return folder
-        } catch {
-            preparationTasks[model] = nil
-            update(model) { record in
-                record.state = .failed
-                record.errorMessage = error.localizedDescription
-            }
-            throw error
+        Task { [weak self] in
+            _ = await task.result
+            self?.preparationTasks[model] = nil
         }
+        return try await waitForPreparation(task)
     }
 
     public func delete(_ model: OfflineWhisperModel) throws {
@@ -151,8 +186,17 @@ public final class OfflineWhisperModelManager: ObservableObject {
 
     public func refreshInstalledState() {
         for model in OfflineWhisperModel.allCases {
-            guard var record = records[model] else { continue }
-            if record.state == .downloading { record.state = .notInstalled }
+            var record = records[model] ?? self.record(for: model)
+            if let discovered = discoverInstalledFolder(for: model) {
+                record.state = .installed
+                record.progress = 1
+                record.folderPath = discovered.path
+                record.completedBytes = directorySize(discovered)
+                record.totalBytes = max(record.completedBytes, record.totalBytes)
+                record.errorMessage = nil
+            } else if record.state == .downloading {
+                record.state = .notInstalled
+            }
             if record.state == .installed,
                let path = record.folderPath,
                !FileManager.default.fileExists(atPath: path) {
@@ -164,6 +208,35 @@ public final class OfflineWhisperModelManager: ObservableObject {
             records[model] = record
         }
         saveRecords()
+    }
+
+    private func waitForPreparation(_ task: Task<URL, Error>) async throws -> URL {
+        let waiter = ModelPreparationWaiter()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.install(continuation)
+                Task.detached {
+                    waiter.finish(await task.result)
+                }
+            }
+        } onCancel: {
+            waiter.finish(.failure(CancellationError()))
+        }
+    }
+
+    private func discoverInstalledFolder(for model: OfflineWhisperModel) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: Self.modelsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent == model.rawValue,
+                  (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  directorySize(url) > 0 else { continue }
+            return url
+        }
+        return nil
     }
 
     private func update(_ model: OfflineWhisperModel, _ mutation: (inout OfflineModelInstallRecord) -> Void) {

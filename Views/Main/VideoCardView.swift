@@ -271,7 +271,7 @@ public struct VideoCardView: View {
     }
 
     private func enqueueDefaultSubtitleTask() {
-        subtitleTasks.enqueue(videoURL: video.fileURL, videoTitle: video.title)
+        subtitleTasks.enqueue(videoURL: video.fileURL, videoTitle: video.title, isPrivate: video.isHidden)
     }
 
     private func subtitleBadge(_ task: SubtitleTaskItem) -> some View {

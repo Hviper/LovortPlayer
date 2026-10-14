@@ -58,6 +58,7 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
     public var model: OfflineWhisperModel
     public var translationProvider: SubtitleTranslationProviderType
     public var enhanceWithGPT: Bool
+    public var isPrivate: Bool?
     public var preferredStartTime: TimeInterval
     public let createdAt: Date
     public var updatedAt: Date
@@ -71,6 +72,22 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
         default: return min(0.99, transcriptionProgress * 0.72 + translationProgress * 0.28)
         }
     }
+
+    func matchesConfiguration(
+        sourceLanguage: SubtitleSourceLanguage,
+        targetLanguage: String,
+        engine: AISubtitleEngineType,
+        model: OfflineWhisperModel,
+        translationProvider: SubtitleTranslationProviderType,
+        enhanceWithGPT: Bool
+    ) -> Bool {
+        self.sourceLanguage == sourceLanguage
+            && self.targetLanguage == targetLanguage
+            && self.engine == engine
+            && self.model == model
+            && self.translationProvider == translationProvider
+            && self.enhanceWithGPT == enhanceWithGPT
+    }
 }
 
 @MainActor
@@ -82,6 +99,7 @@ public final class SubtitleTaskManager: ObservableObject {
 
     private var workerTask: Task<Void, Never>?
     private var runningTaskID: UUID?
+    private var runTokens: [UUID: UUID] = [:]
     private let storeURL: URL
 
     private init() {
@@ -124,6 +142,7 @@ public final class SubtitleTaskManager: ObservableObject {
         model: OfflineWhisperModel? = nil,
         translationProvider: SubtitleTranslationProviderType? = nil,
         enhanceWithGPT: Bool? = nil,
+        isPrivate: Bool = false,
         preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false
     ) -> UUID {
@@ -133,17 +152,35 @@ public final class SubtitleTaskManager: ObservableObject {
         if let index = tasks.firstIndex(where: {
             videoKey($0.videoURL) == videoKey(videoURL) && $0.phase.isActive
         }) {
-            tasks[index].preferredStartTime = preferredStartTime
-            tasks[index].updatedAt = Date()
-            saveTasks()
-            return tasks[index].id
+            if !forceRegenerate,
+               tasks[index].matchesConfiguration(
+                   sourceLanguage: sourceLanguage,
+                   targetLanguage: targetLanguage,
+                   engine: engine,
+                   model: selectedModel,
+                   translationProvider: selectedProvider,
+                   enhanceWithGPT: selectedEnhancement
+               ) {
+                tasks[index].preferredStartTime = preferredStartTime
+                tasks[index].updatedAt = Date()
+                saveTasks()
+                return tasks[index].id
+            }
+            cancel(tasks[index].id)
         }
 
         if !forceRegenerate,
            let existing = task(for: videoURL),
            existing.phase == .completed,
-           existing.model == selectedModel,
-           existing.translationProvider == selectedProvider {
+           existing.matchesConfiguration(
+               sourceLanguage: sourceLanguage,
+               targetLanguage: targetLanguage,
+               engine: engine,
+               model: selectedModel,
+               translationProvider: selectedProvider,
+               enhanceWithGPT: selectedEnhancement
+           ),
+           SubtitleCacheStore().load(for: videoURL) != nil {
             return existing.id
         }
 
@@ -151,9 +188,20 @@ public final class SubtitleTaskManager: ObservableObject {
            let existingIndex = tasks.firstIndex(where: {
                videoKey($0.videoURL) == videoKey(videoURL)
                    && [.pausedByUser, .pausedBySystem, .failed, .sourceReady, .cancelled].contains($0.phase)
+                   && $0.matchesConfiguration(
+                       sourceLanguage: sourceLanguage,
+                       targetLanguage: targetLanguage,
+                       engine: engine,
+                       model: selectedModel,
+                       translationProvider: selectedProvider,
+                       enhanceWithGPT: selectedEnhancement
+                   )
            }) {
             tasks[existingIndex].phase = .queued
             tasks[existingIndex].statusText = "等待从已保存进度继续"
+            tasks[existingIndex].translationProgress = 0
+            tasks[existingIndex].translatedBatches = 0
+            tasks[existingIndex].totalTranslationBatches = 0
             tasks[existingIndex].preferredStartTime = preferredStartTime
             tasks[existingIndex].errorMessage = nil
             tasks[existingIndex].updatedAt = Date()
@@ -165,7 +213,7 @@ public final class SubtitleTaskManager: ObservableObject {
         let item = SubtitleTaskItem(
             id: UUID(),
             videoURL: videoURL,
-            videoTitle: videoTitle,
+            videoTitle: isPrivate ? "私密视频" : videoTitle,
             phase: .queued,
             statusText: "等待开始",
             transcriptionProgress: 0,
@@ -181,6 +229,7 @@ public final class SubtitleTaskManager: ObservableObject {
             model: selectedModel,
             translationProvider: selectedProvider,
             enhanceWithGPT: selectedEnhancement,
+            isPrivate: isPrivate,
             preferredStartTime: preferredStartTime,
             createdAt: Date(),
             updatedAt: Date(),
@@ -200,7 +249,10 @@ public final class SubtitleTaskManager: ObservableObject {
         tasks[index].statusText = "已暂停，进度已经保存"
         tasks[index].updatedAt = Date()
         saveTasks()
-        if runningTaskID == id { workerTask?.cancel() }
+        if runningTaskID == id {
+            runTokens[id] = nil
+            workerTask?.cancel()
+        }
     }
 
     public func resume(_ id: UUID) {
@@ -219,7 +271,24 @@ public final class SubtitleTaskManager: ObservableObject {
         tasks[index].statusText = "任务已取消；已完成分片仍可用于续做"
         tasks[index].updatedAt = Date()
         saveTasks()
-        if runningTaskID == id { workerTask?.cancel() }
+        if runningTaskID == id {
+            runTokens[id] = nil
+            workerTask?.cancel()
+        }
+    }
+
+    public func cancelTasks(for videoURL: URL) {
+        let key = videoKey(videoURL)
+        let matchingIDs = tasks.filter { videoKey($0.videoURL) == key && $0.phase.isActive }.map(\.id)
+        for id in matchingIDs { cancel(id) }
+    }
+
+    public func purgeTasks(for videoURL: URL) {
+        cancelTasks(for: videoURL)
+        let key = videoKey(videoURL)
+        tasks.removeAll { videoKey($0.videoURL) == key }
+        liveSubtitles.removeValue(forKey: key)
+        saveTasks()
     }
 
     public func retry(_ id: UUID) {
@@ -240,16 +309,19 @@ public final class SubtitleTaskManager: ObservableObject {
                 .sorted(by: { $0.createdAt < $1.createdAt })
                 .first else { return }
         runningTaskID = next.id
+        let runToken = UUID()
+        runTokens[next.id] = runToken
         workerTask = Task { [weak self] in
             guard let self else { return }
-            await self.execute(next.id)
+            await self.execute(next.id, runToken: runToken)
+            self.runTokens[next.id] = nil
             self.runningTaskID = nil
             self.workerTask = nil
             self.pumpQueue()
         }
     }
 
-    private func execute(_ id: UUID) async {
+    private func execute(_ id: UUID, runToken: UUID) async {
         guard let snapshot = tasks.first(where: { $0.id == id }) else { return }
         update(id) { item in
             item.phase = snapshot.engine == .localWhisperKit ? .waitingForModel : .preparingAudio
@@ -269,16 +341,17 @@ public final class SubtitleTaskManager: ObservableObject {
                 preferredStartTime: snapshot.preferredStartTime,
                 forceRegenerate: false,
                 onProgress: { [weak self] status in
-                    Task { @MainActor in self?.applyStatus(status, to: id) }
+                    Task { @MainActor in self?.applyStatus(status, to: id, runToken: runToken) }
                 },
                 onTranscriptionProgress: { [weak self] completed, total in
-                    await self?.applyTranscriptionProgress(completed: completed, total: total, to: id)
+                    await self?.applyTranscriptionProgress(completed: completed, total: total, to: id, runToken: runToken)
                 },
                 onPartialResult: { [weak self] partialLines in
-                    await self?.applyPartialLines(partialLines, to: id)
+                    await self?.applyPartialLines(partialLines, to: id, runToken: runToken)
                 }
             )
             try Task.checkCancellation()
+            guard runTokens[id] == runToken else { throw CancellationError() }
             liveSubtitles[videoKey(snapshot.videoURL)] = lines
             let translatedCount = lines.filter { !($0.translatedText ?? "").isEmpty }.count
             update(id) { item in
@@ -304,7 +377,9 @@ public final class SubtitleTaskManager: ObservableObject {
             )
             scheduleCompletionNotification(for: snapshot, bilingual: completed?.phase == .completed)
         } catch is CancellationError {
-            if let current = tasks.first(where: { $0.id == id }), current.phase.isActive {
+            if let current = tasks.first(where: { $0.id == id }),
+               current.phase.isActive,
+               current.phase != .queued {
                 update(id) { item in
                     item.phase = .pausedBySystem
                     item.statusText = "任务已暂停，下次继续时从检查点恢复"
@@ -320,7 +395,9 @@ public final class SubtitleTaskManager: ObservableObject {
         }
     }
 
-    private func applyTranscriptionProgress(completed: Int, total: Int, to id: UUID) {
+    private func applyTranscriptionProgress(completed: Int, total: Int, to id: UUID, runToken: UUID) {
+        guard runningTaskID == id, runTokens[id] == runToken,
+              tasks.first(where: { $0.id == id })?.phase.isActive == true else { return }
         update(id) { item in
             item.phase = .transcribing
             item.completedChunks = completed
@@ -330,14 +407,16 @@ public final class SubtitleTaskManager: ObservableObject {
         }
     }
 
-    private func applyPartialLines(_ lines: [SubtitleLine], to id: UUID) {
-        guard let item = tasks.first(where: { $0.id == id }) else { return }
+    private func applyPartialLines(_ lines: [SubtitleLine], to id: UUID, runToken: UUID) {
+        guard runningTaskID == id, runTokens[id] == runToken,
+              let item = tasks.first(where: { $0.id == id }), item.phase.isActive else { return }
         liveSubtitles[videoKey(item.videoURL)] = lines
         update(id) { value in value.lineCount = lines.count }
     }
 
-    private func applyStatus(_ status: String, to id: UUID) {
-        guard let index = index(of: id), tasks[index].phase.isActive else { return }
+    private func applyStatus(_ status: String, to id: UUID, runToken: UUID) {
+        guard runningTaskID == id, runTokens[id] == runToken,
+              let index = index(of: id), tasks[index].phase.isActive else { return }
         let oldPhase = tasks[index].phase
         tasks[index].statusText = status
         if status.contains("准备离线模型") {
@@ -419,13 +498,20 @@ public final class SubtitleTaskManager: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(tasks) else { return }
         try? data.write(to: storeURL, options: .atomic)
+        #if os(iOS)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: storeURL.path)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var protectedURL = storeURL
+        try? protectedURL.setResourceValues(values)
+        #endif
     }
 
     private func scheduleCompletionNotification(for item: SubtitleTaskItem, bilingual: Bool) {
         guard UserDefaults.standard.bool(forKey: "settings.subtitleCompletionNotifications") else { return }
         let content = UNMutableNotificationContent()
         content.title = bilingual ? "双语字幕已就绪" : "原文字幕已就绪"
-        content.body = item.videoTitle
+        content.body = item.isPrivate == true ? "私密视频的字幕任务已经完成" : item.videoTitle
         content.sound = .default
         let request = UNNotificationRequest(identifier: "subtitle-\(item.id.uuidString)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)

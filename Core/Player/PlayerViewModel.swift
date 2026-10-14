@@ -54,6 +54,7 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var exportMessage: String? = nil
 
     @Published public private(set) var currentVideoURL: URL?
+    public private(set) var currentVideoIsPrivate: Bool = false
     private var timeObserverToken: Any?
     private var controlsHideTimer: Task<Void, Never>?
     private var subtitleTaskObservation: AnyCancellable?
@@ -67,7 +68,7 @@ public final class PlayerViewModel: ObservableObject {
         }
     }
 
-    public func loadVideo(url: URL) {
+    public func loadVideo(url: URL, isPrivate: Bool = false) {
         cleanupPlaybackEngines(saveProgress: false)
         isGeneratingSubtitles = false
         generatingSubtitleStatusText = ""
@@ -77,6 +78,7 @@ public final class PlayerViewModel: ObservableObject {
         currentSubtitle = nil
         isAISubtitleEnabled = false
         self.currentVideoURL = url
+        self.currentVideoIsPrivate = isPrivate
         resetControlsTimeout()
 
         // 应用设置中的默认音量
@@ -374,6 +376,7 @@ public final class PlayerViewModel: ObservableObject {
             model: offlineModel,
             translationProvider: translationProvider,
             enhanceWithGPT: enhanceWithGPT,
+            isPrivate: currentVideoIsPrivate,
             preferredStartTime: currentTime
         )
         syncGlobalSubtitleTask()

@@ -32,6 +32,7 @@ final class SubtitlePipelineTests: XCTestCase {
             model: .balanced,
             translationProvider: .apple,
             enhanceWithGPT: false,
+            isPrivate: nil,
             preferredStartTime: 0,
             createdAt: now,
             updatedAt: now,
@@ -40,6 +41,61 @@ final class SubtitlePipelineTests: XCTestCase {
         )
         XCTAssertEqual(item.overallProgress, 0.86, accuracy: 0.0001)
         XCTAssertEqual(OfflineWhisperModel.highAccuracy.estimatedSizeBytes, 626 * 1_024 * 1_024)
+    }
+
+    func testTaskReuseRequiresEntireSubtitleConfigurationToMatch() {
+        let now = Date()
+        let item = SubtitleTaskItem(
+            id: UUID(),
+            videoURL: URL(fileURLWithPath: "/tmp/movie.mp4"),
+            videoTitle: "movie.mp4",
+            phase: .completed,
+            statusText: "已完成",
+            transcriptionProgress: 1,
+            translationProgress: 1,
+            completedChunks: 10,
+            totalChunks: 10,
+            translatedBatches: 4,
+            totalTranslationBatches: 4,
+            lineCount: 100,
+            sourceLanguage: .japanese,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .apple,
+            enhanceWithGPT: false,
+            isPrivate: false,
+            preferredStartTime: 0,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: now,
+            errorMessage: nil
+        )
+
+        XCTAssertTrue(item.matchesConfiguration(
+            sourceLanguage: .japanese,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .apple,
+            enhanceWithGPT: false
+        ))
+        XCTAssertFalse(item.matchesConfiguration(
+            sourceLanguage: .english,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .apple,
+            enhanceWithGPT: false
+        ))
+        XCTAssertFalse(item.matchesConfiguration(
+            sourceLanguage: .japanese,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .deepL,
+            enhanceWithGPT: false
+        ))
     }
 
     func testLanguageMapping() {

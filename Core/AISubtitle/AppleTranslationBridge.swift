@@ -32,25 +32,33 @@ public final class AppleTranslationBridge: ObservableObject, SubtitleTranslation
         let source = sourceLanguage.appleLanguage
         let target = targetLanguage.appleTargetLanguage
         let requestID = UUID()
-        return try await withCheckedThrowingContinuation { continuation in
-            pending = PendingRequest(id: requestID, lines: lines, onProgress: onProgress, continuation: continuation)
-            configuration = TranslationSession.Configuration(source: source, target: target)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = PendingRequest(id: requestID, lines: lines, onProgress: onProgress, continuation: continuation)
+                configuration = TranslationSession.Configuration(source: source, target: target)
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(600))
+                    guard let self, self.pending?.id == requestID else { return }
+                    self.finish(.failure(self.bridgeError("Apple 翻译等待超时，请确认语言包下载已经完成")))
+                }
+            }
+        } onCancel: {
             Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(600))
-                guard let self, self.pending?.id == requestID else { return }
-                self.finish(.failure(self.bridgeError("Apple 翻译等待超时，请确认语言包下载已经完成")))
+                self?.cancel(requestID)
             }
         }
     }
 
     public func perform(using session: TranslationSession) async {
         guard let pending else { return }
+        let requestID = pending.id
         do {
             var translations: [Int: String] = [:]
             let batchSize = 100
             let batchCount = Int(ceil(Double(pending.lines.count) / Double(batchSize)))
             for batchIndex in 0..<batchCount {
                 try Task.checkCancellation()
+                guard self.pending?.id == requestID else { throw CancellationError() }
                 pending.onProgress?("正在进行 Apple 设备端翻译 \(batchIndex + 1)/\(batchCount)...")
                 let start = batchIndex * batchSize
                 let end = min(start + batchSize, pending.lines.count)
@@ -61,6 +69,7 @@ public final class AppleTranslationBridge: ObservableObject, SubtitleTranslation
                     )
                 }
                 let responses = try await session.translations(from: requests)
+                guard self.pending?.id == requestID else { throw CancellationError() }
                 for response in responses {
                     if let identifier = response.clientIdentifier, let index = Int(identifier) {
                         translations[index] = response.targetText
@@ -77,14 +86,18 @@ public final class AppleTranslationBridge: ObservableObject, SubtitleTranslation
                     translatedText: translations[index]
                 )
             }
-            finish(.success(result))
+            finish(.success(result), requestID: requestID)
         } catch {
-            finish(.failure(error))
+            finish(.failure(error), requestID: requestID)
         }
     }
 
-    private func finish(_ result: Result<[SubtitleLine], Error>) {
-        guard let pending else { return }
+    private func cancel(_ requestID: UUID) {
+        finish(.failure(CancellationError()), requestID: requestID)
+    }
+
+    private func finish(_ result: Result<[SubtitleLine], Error>, requestID: UUID? = nil) {
+        guard let pending, requestID == nil || pending.id == requestID else { return }
         self.pending = nil
         configuration = nil
         pending.continuation.resume(with: result)

@@ -210,6 +210,7 @@ public struct MediaLibraryHomeView: View {
                 FullscreenVideoPlayerView(
                     videoURL: video.fileURL,
                     videoTitle: video.title,
+                    isPrivate: video.isHidden,
                     onDismiss: {
                         selectedVideo = nil
                     }

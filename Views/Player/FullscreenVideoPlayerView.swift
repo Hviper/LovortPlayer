@@ -9,6 +9,7 @@ public struct FullscreenVideoPlayerView: View {
     @ObservedObject private var settings = AppSettings.shared
     public let videoURL: URL
     public let videoTitle: String
+    public let isPrivate: Bool
     public var onDismiss: () -> Void
 
     // 局部手势与状态
@@ -21,9 +22,10 @@ public struct FullscreenVideoPlayerView: View {
     @State private var initialVolume: Float = 0.5
     @State private var showSubtitleTimeline = false
 
-    public init(videoURL: URL, videoTitle: String, onDismiss: @escaping () -> Void) {
+    public init(videoURL: URL, videoTitle: String, isPrivate: Bool = false, onDismiss: @escaping () -> Void) {
         self.videoURL = videoURL
         self.videoTitle = videoTitle
+        self.isPrivate = isPrivate
         self.onDismiss = onDismiss
     }
 
@@ -167,7 +169,7 @@ public struct FullscreenVideoPlayerView: View {
             }
         }
         .onAppear {
-            viewModel.loadVideo(url: videoURL)
+            viewModel.loadVideo(url: videoURL, isPrivate: isPrivate)
             viewModel.togglePlayPause()
             #if os(iOS)
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()

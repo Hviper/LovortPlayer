@@ -143,6 +143,10 @@ public final class MediaLibraryManager: ObservableObject {
         let fileName = sourceURL.lastPathComponent
         let destURL = destFolder.appendingPathComponent(fileName)
 
+        if FileManager.default.fileExists(atPath: destURL.path) {
+            SubtitleTaskManager.shared.purgeTasks(for: destURL)
+        }
+
         isImporting = true
         importStatusText = "正在导入 \(fileName)..."
 
@@ -203,6 +207,10 @@ public final class MediaLibraryManager: ObservableObject {
             let destFolder = isHidden ? vaultDirectory : documentsDirectory
             let destURL = destFolder.appendingPathComponent(fileName)
 
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                SubtitleTaskManager.shared.purgeTasks(for: destURL)
+            }
+
             do {
                 try await Task.detached(priority: .userInitiated) {
                     let fm = FileManager.default
@@ -246,6 +254,7 @@ public final class MediaLibraryManager: ObservableObject {
 
     /// 将视频移动到保险箱（支持真实 AES-256 加密落盘）/ 移出保险箱
     public func toggleHideVideo(_ video: VideoItem) async throws {
+        SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
         if video.isHidden {
             // 移出保险箱 -> 解密回 Documents
             let destName = video.fileURL.lastPathComponent.replacingOccurrences(of: ".vault", with: "")
@@ -274,6 +283,7 @@ public final class MediaLibraryManager: ObservableObject {
 
     /// 删除视频
     public func deleteVideo(_ video: VideoItem) {
+        SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
         try? fileManager.removeItem(at: video.fileURL)
         reloadLibrary()
     }

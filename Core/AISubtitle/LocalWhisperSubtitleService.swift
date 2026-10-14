@@ -100,6 +100,7 @@ public actor LocalWhisperSubtitleService {
         if pipeline == nil || loadedModel != model {
             onProgress?("正在准备离线模型（首次使用需联网下载 \(model.displayName)）...")
             let modelFolder = try await OfflineWhisperModelManager.shared.prepare(model)
+            try Task.checkCancellation()
             pipeline = try await WhisperKit(
                 WhisperKitConfig(
                     model: model.rawValue,
@@ -123,6 +124,7 @@ public actor LocalWhisperSubtitleService {
         }
 
         do {
+            try Task.checkCancellation()
             let asset = try await makeAudioComposition(from: audioURL, sourceLanguage: sourceLanguage)
             let durationValue = try await asset.load(.duration)
             let duration = CMTimeGetSeconds(durationValue)

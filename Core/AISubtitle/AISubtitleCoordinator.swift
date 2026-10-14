@@ -184,10 +184,6 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         let selectedModel = model ?? offlineModel
         let selectedTranslationProvider = translationProvider ?? self.translationProvider
         let shouldEnhanceWithGPT = enhanceWithGPT ?? isGPTEnhancementEnabled
-        currentEngine = selectedEngine
-        offlineModel = selectedModel
-        self.translationProvider = selectedTranslationProvider
-        isGPTEnhancementEnabled = shouldEnhanceWithGPT
 
         let cachedDocument = cacheStore.load(for: videoURL)
         let expectedModel = selectedEngine == .localWhisperKit ? selectedModel.rawValue : nil
@@ -368,10 +364,13 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                 )
                 gptEnhanced = true
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             translationWarning = "翻译未完成：\(error.localizedDescription)；已保留原文字幕"
         }
 
+        try Task.checkCancellation()
         let document = SubtitleDocument(
             sourceLanguage: sourceLanguage.rawValue,
             targetLanguage: targetLanguage,
@@ -385,6 +384,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             lines: finalLines
         )
         _ = try cacheStore.save(document, for: videoURL)
+        try Task.checkCancellation()
         saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: "bilingual")
         saveSRTBestEffort(lines: finalLines, videoURL: videoURL, suffix: nil)
         if translationComplete {
