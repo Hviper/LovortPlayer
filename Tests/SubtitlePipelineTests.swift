@@ -2,6 +2,17 @@ import XCTest
 @testable import LovortPlayerCore
 
 final class SubtitlePipelineTests: XCTestCase {
+    func testMacSubtitleAddressOnlyAcceptsLocalNetworkHosts() {
+        let previous = LANMacSubtitleSettings.address
+        defer { LANMacSubtitleSettings.address = previous }
+        LANMacSubtitleSettings.address = "192.168.1.20:8765"
+        XCTAssertEqual(try LANMacSubtitleSettings.baseURL().host, "192.168.1.20")
+        LANMacSubtitleSettings.address = "https://example.com"
+        XCTAssertThrowsError(try LANMacSubtitleSettings.baseURL())
+        LANMacSubtitleSettings.address = "http://8.8.8.8:8765"
+        XCTAssertThrowsError(try LANMacSubtitleSettings.baseURL())
+    }
+
     func testFirstOfflineSliceOnlyExportsPreviewAudio() {
         XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(240), 20)
         XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(26), 20)

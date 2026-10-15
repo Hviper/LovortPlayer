@@ -21,7 +21,12 @@
     <key>NSFaceIDUsageDescription</key>
     <string>使用 Face ID 解锁私密视频保险箱</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>使用局域网功能实现电脑端视频免流直传</string>
+    <string>连接局域网 Mac 字幕服务、传输选中音轨，以及电脑端视频传输</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSBonjourServices</key>
     <array>
         <string>_http._tcp</string>

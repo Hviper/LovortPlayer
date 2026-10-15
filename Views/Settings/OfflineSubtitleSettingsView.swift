@@ -23,6 +23,13 @@ public struct OfflineSubtitleSettingsView: View {
             Color(red: 0.04, green: 0.04, blue: 0.05).ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    NavigationLink {
+                        LANMacSubtitleSettingsView()
+                    } label: {
+                        Label("局域网 Mac 字幕服务", systemImage: "desktopcomputer")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
                     VStack(alignment: .leading, spacing: 6) {
                         Text("提前安装模型后，即使没有网络，也可以为视频生成原文字幕。模型下载可在离开本页面后继续。")
                             .font(.system(size: 13))

@@ -366,6 +366,7 @@ public final class SubtitleTaskManager: ObservableObject {
                 enhanceWithGPT: snapshot.enhanceWithGPT,
                 preferredStartTime: snapshot.preferredStartTime,
                 forceRegenerate: false,
+                isPrivate: snapshot.isPrivate == true,
                 onProgress: { [weak self] status in
                     Task { @MainActor in self?.applyStatus(status, to: id, runToken: runToken) }
                 },

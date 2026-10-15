@@ -589,7 +589,7 @@ public actor LocalWhisperSubtitleService {
         return (lines: lines, detectedLanguage: detectedLanguage)
     }
 
-    private func exportAudioSlice(
+    func exportAudioSlice(
         mediaURL: URL,
         sourceLanguage: SubtitleSourceLanguage,
         start: TimeInterval,

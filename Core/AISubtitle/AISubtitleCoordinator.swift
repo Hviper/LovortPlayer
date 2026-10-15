@@ -4,6 +4,7 @@ import Security
 
 public enum AISubtitleEngineType: String, CaseIterable, Codable, Identifiable, Sendable {
     case localWhisperKit
+    case lanMac
     case cloudOpenAI
     case cloudAntigravity
 
@@ -12,6 +13,7 @@ public enum AISubtitleEngineType: String, CaseIterable, Codable, Identifiable, S
     public var displayName: String {
         switch self {
         case .localWhisperKit: return "离线 WhisperKit（推荐）"
+        case .lanMac: return "局域网 Mac 转写"
         case .cloudOpenAI: return "OpenAI API 云端转写"
         case .cloudAntigravity: return "Antigravity 云端转写"
         }
@@ -51,6 +53,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     private let translationProviderStorageKey = "LovortTranslationProvider"
     private let gptEnhancementStorageKey = "LovortGPTSubtitleEnhancement"
     private let localService = LocalWhisperSubtitleService()
+    private let lanMacService = LANMacSubtitleService()
     private let cacheStore = SubtitleCacheStore()
 
     private init() {
@@ -190,22 +193,28 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         enhanceWithGPT: Bool? = nil,
         preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false,
+        isPrivate: Bool = false,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onTranscriptionProgress: (@Sendable (_ completedChunks: Int, _ totalChunks: Int) async -> Void)? = nil,
         onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil,
         onEvent: (@Sendable (SubtitleProgressEvent) -> Void)? = nil,
         cachePermit: SubtitleRunPermit? = nil
     ) async throws -> [SubtitleLine] {
-        let privateVideo = videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")
+        let privateVideo = isPrivate || videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")
         if privateVideo, !(await VaultManager.shared.isUnlocked) { throw NSError(domain: "Subtitle", code: 1, userInfo: [NSLocalizedDescriptionKey: "请先解锁保险箱"]) }
         let selectedEngine = engine ?? currentEngine
+        if privateVideo && selectedEngine == .lanMac {
+            throw NSError(domain: "Subtitle", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "私密视频暂不支持发送音轨到 Mac，请选择本机离线转写"])
+        }
         let selectedModel = model ?? offlineModel
         let selectedTranslationProvider = effectiveTranslationProvider(translationProvider ?? self.translationProvider)
         let translationSettings = TranslationAPISettings(provider: selectedTranslationProvider)
         let shouldEnhanceWithGPT = enhanceWithGPT ?? isGPTEnhancementEnabled
 
         let cachedDocument = cacheStore.load(for: videoURL)
-        let expectedModel = selectedEngine == .localWhisperKit ? selectedModel.rawValue : nil
+        let expectedModel = selectedEngine == .localWhisperKit ? selectedModel.rawValue
+            : (selectedEngine == .lanMac ? LANMacSubtitleService.modelIdentifier : nil)
         if !forceRegenerate {
             if let cachedDocument,
                cachedDocument.isComplete != false,
@@ -248,7 +257,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         }()
 
         let resumableDocument: SubtitleDocument? = {
-            guard selectedEngine == .localWhisperKit,
+            guard selectedEngine == .localWhisperKit || selectedEngine == .lanMac,
                   let cachedDocument,
                   cachedDocument.isComplete == false,
                   cachedDocument.sourceLanguage == sourceLanguage.rawValue,
@@ -300,17 +309,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             onProgress?("已复用上次离线转写结果，正在重试翻译...")
         } else {
             switch selectedEngine {
-            case .localWhisperKit:
-                originalLines = try await localService.transcribeProgressively(
-                    audioURL: readable,
-                    sourceLanguage: sourceLanguage,
-                    model: selectedModel,
-                    preferredStartTime: preferredStartTime,
-                    existingLines: initialLines,
-                    completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
-                    onProgress: onProgress,
-                    onEvent: onEvent,
-                    onPartialResult: { [cacheStore] update in
+            case .localWhisperKit, .lanMac:
+                let partialHandler: @Sendable (LocalWhisperSubtitleService.ProgressiveUpdate) async -> [SubtitleLine]? = { [cacheStore] update in
                         await onTranscriptionProgress?(update.completedChunkIndexes.count, update.totalChunkCount)
                         if let pipeline { return await pipeline.submit(update.lines, completed: update.completedChunkIndexes, total: update.totalChunkCount) }
                         if !update.lines.isEmpty {
@@ -335,7 +335,19 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                         _ = try? Self.persist(partialDocument, for: videoURL, store: cacheStore, permit: cachePermit)
                         return update.lines
                     }
-                )
+                if selectedEngine == .localWhisperKit {
+                    originalLines = try await localService.transcribeProgressively(
+                        audioURL: readable, sourceLanguage: sourceLanguage, model: selectedModel,
+                        preferredStartTime: preferredStartTime, existingLines: initialLines,
+                        completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
+                        onProgress: onProgress, onEvent: onEvent, onPartialResult: partialHandler)
+                } else {
+                    originalLines = try await lanMacService.transcribeProgressively(
+                        audioURL: readable, sourceLanguage: sourceLanguage,
+                        preferredStartTime: preferredStartTime, existingLines: initialLines,
+                        completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
+                        onProgress: onProgress, onEvent: onEvent, onPartialResult: partialHandler)
+                }
             case .cloudOpenAI:
                 guard platformKey.hasPrefix("sk-") else {
                     throw NSError(

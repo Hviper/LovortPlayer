@@ -163,6 +163,7 @@ public struct AISubtitleSettingsSheet: View {
                 if let url = viewModel.currentVideoURL { UserDefaults.standard.set(language.rawValue, forKey: "subtitle.language.\(MediaIdentityStore.shared.id(for: url))") }
             }
             .onChange(of: selectedOfflineModel) { _, model in AISubtitleCoordinator.shared.offlineModel = model }
+            .onChange(of: selectedEngine) { _, engine in AISubtitleCoordinator.shared.currentEngine = engine }
             .onDisappear { preview.cancel() }
         }
     }
@@ -286,7 +287,7 @@ public struct AISubtitleSettingsSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
 
-            Text("💡 WhisperKit 会优先处理当前播放位置附近的音频。首段原文出来后立即翻译，后续识别继续进行；每批成功译文自动保存。模型首次使用需联网下载，之后可离线转写。")
+            Text("首段原文出来后即可查看，后续识别和翻译继续进行；成功结果会自动保存。")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -298,10 +299,12 @@ public struct AISubtitleSettingsSheet: View {
                 Picker("转写方式", selection: $selectedEngine) {
                     Text(AISubtitleEngineType.localWhisperKit.displayName)
                         .tag(AISubtitleEngineType.localWhisperKit)
+                    Text(AISubtitleEngineType.lanMac.displayName)
+                        .tag(AISubtitleEngineType.lanMac)
                     Text(AISubtitleEngineType.cloudOpenAI.displayName)
                         .tag(AISubtitleEngineType.cloudOpenAI)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
             }
 
             if selectedEngine == .localWhisperKit {
@@ -339,6 +342,13 @@ public struct AISubtitleSettingsSheet: View {
                         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
                     }
                 }
+            } else if selectedEngine == .lanMac {
+                NavigationLink {
+                    LANMacSubtitleSettingsView()
+                } label: {
+                    Label("配置并测试 Mac 服务", systemImage: "desktopcomputer")
+                }
+                .font(.system(size: 12))
             } else {
                 Text("云端转写会按 4 分钟自动切片，避免 OpenAI 单文件 25 MB 限制；必须填写 Platform API Key。")
                     .font(.system(size: 10))
@@ -484,7 +494,8 @@ public struct AISubtitleSettingsSheet: View {
                                 .font(.system(size: 14, weight: .semibold))
                         } else {
                             Image(systemName: "sparkles")
-                            Text(selectedEngine == .localWhisperKit ? "离线生成原文并翻译为双语字幕" : "云端生成并翻译为双语字幕")
+                            Text(selectedEngine == .localWhisperKit ? "离线生成双语字幕"
+                                 : (selectedEngine == .lanMac ? "由 Mac 生成双语字幕" : "云端生成双语字幕"))
                                 .font(.system(size: 14, weight: .semibold))
                         }
                     }
