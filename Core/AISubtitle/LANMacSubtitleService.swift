@@ -71,6 +71,9 @@ public enum LANMacSubtitleSettings {
 public actor LANMacSubtitleService {
     public static let modelIdentifier = "mlx-whisper-large-v3-turbo"
     private let exporter = LocalWhisperSubtitleService()
+    private let session: URLSession
+    private let pollInterval: Duration
+    private let sleeper: @Sendable (Duration) async throws -> Void
 
     private struct Health: Decodable {
         let service: String
@@ -99,14 +102,29 @@ public actor LANMacSubtitleService {
         }
     }
 
-    public init() {}
+    public init() {
+        session = .shared
+        pollInterval = .seconds(4)
+        sleeper = { try await Task.sleep(for: $0) }
+    }
+
+    init(session: URLSession, pollInterval: Duration,
+         sleeper: @escaping @Sendable (Duration) async throws -> Void) {
+        self.session = session
+        self.pollInterval = pollInterval
+        self.sleeper = sleeper
+    }
 
     public func testConnection() async throws -> String {
         let (baseURL, token) = try configuration()
+        return try await healthCheck(baseURL: baseURL, token: token)
+    }
+
+    private func healthCheck(baseURL: URL, token: String) async throws -> String {
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
         request.setValue(token, forHTTPHeaderField: "X-Lovort-Token")
         request.timeoutInterval = 10
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try check(response: response, data: data)
         let health = try JSONDecoder().decode(Health.self, from: data)
         guard health.service == "lovort-mac-subtitles", health.version >= 2,
@@ -128,8 +146,22 @@ public actor LANMacSubtitleService {
         onPartialResult: (@Sendable (LocalWhisperSubtitleService.ProgressiveUpdate) async -> [SubtitleLine]?)?
     ) async throws -> [SubtitleLine] {
         let (baseURL, token) = try configuration()
-        _ = try await testConnection()
-        var job = try await fetchJob(jobID, from: baseURL, token: token)
+        _ = try await retryTransientNetworkOperation(
+            maximumAttempts: 3,
+            retryStatus: "连接 Mac 暂时超时，正在自动重试…",
+            recoveredStatus: "已重新连接 Mac，正在检查字幕任务…",
+            onProgress: onProgress
+        ) {
+            try await healthCheck(baseURL: baseURL, token: token)
+        }
+        var job = try await retryTransientNetworkOperation(
+            maximumAttempts: 3,
+            retryStatus: "读取 Mac 字幕任务超时，正在自动重试…",
+            recoveredStatus: "已重新连接 Mac，正在继续字幕任务…",
+            onProgress: onProgress
+        ) {
+            try await fetchJob(jobID, from: baseURL, token: token)
+        }
         if job == nil || job?.status == "failed" {
             let asset = AVURLAsset(url: audioURL)
             let tracks = try await asset.loadTracks(withMediaType: .audio)
@@ -188,8 +220,14 @@ public actor LANMacSubtitleService {
                     latestChunkIndex: index, latestChunkLines: chunkLines)) { lines = updated }
             }
             if current.status == "completed" { break }
-            try await Task.sleep(for: .seconds(4))
-            job = try await fetchJob(jobID, from: baseURL, token: token)
+            try await sleeper(pollInterval)
+            job = try await retryTransientNetworkOperation(
+                retryStatus: "与 Mac 的连接暂时中断，Mac 仍在转写；正在自动重连…",
+                recoveredStatus: "已重新连接 Mac，继续领取字幕…",
+                onProgress: onProgress
+            ) {
+                try await fetchJob(jobID, from: baseURL, token: token)
+            }
         }
         guard !lines.isEmpty else { throw LANMacSubtitleSettings.error("Mac 未检测到清晰人声") }
         return lines
@@ -218,7 +256,7 @@ public actor LANMacSubtitleService {
         var request = URLRequest(url: jobURL(id, baseURL: baseURL))
         request.setValue(token, forHTTPHeaderField: "X-Lovort-Token")
         request.timeoutInterval = 15
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         if (response as? HTTPURLResponse)?.statusCode == 404 { return nil }
         try check(response: response, data: data)
         return try JSONDecoder().decode(RemoteJob.self, from: data)
@@ -232,7 +270,7 @@ public actor LANMacSubtitleService {
         request.timeoutInterval = 900
         request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: "X-Lovort-Token")
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: file)
+        let (data, response) = try await session.upload(for: request, fromFile: file)
         try check(response: response, data: data)
         return try JSONDecoder().decode(RemoteJob.self, from: data)
     }
@@ -245,5 +283,55 @@ public actor LANMacSubtitleService {
             let detail = String(data: data.prefix(300), encoding: .utf8) ?? ""
             throw LANMacSubtitleSettings.error("Mac 服务错误 \(http.statusCode)：\(detail)")
         }
+    }
+
+    func retryTransientNetworkOperation<T>(
+        maximumAttempts: Int? = nil,
+        retryStatus: String = "与 Mac 的连接暂时中断，正在自动重连…",
+        recoveredStatus: String? = "已重新连接 Mac…",
+        onProgress: (@Sendable (String) -> Void)?,
+        operation: () async throws -> T
+    ) async throws -> T {
+        var failureCount = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let result = try await operation()
+                if failureCount > 0, let recoveredStatus { onProgress?(recoveredStatus) }
+                return result
+            } catch let error as CancellationError {
+                throw error
+            } catch {
+                try Task.checkCancellation()
+                guard Self.isTransientNetworkError(error) else { throw error }
+                failureCount += 1
+                if let maximumAttempts, failureCount >= maximumAttempts { throw error }
+                onProgress?(retryStatus)
+                try await sleeper(Self.reconnectDelay(after: failureCount))
+            }
+        }
+    }
+
+    static func isTransientNetworkError(_ error: Error) -> Bool {
+        let code: URLError.Code
+        if let urlError = error as? URLError {
+            code = urlError.code
+        } else {
+            let nsError = error as NSError
+            guard nsError.domain == NSURLErrorDomain else { return false }
+            code = URLError.Code(rawValue: nsError.code)
+        }
+        switch code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func reconnectDelay(after failureCount: Int) -> Duration {
+        let seconds: [Double] = [2, 4, 8, 15, 30]
+        return .seconds(seconds[min(max(1, failureCount), seconds.count) - 1])
     }
 }

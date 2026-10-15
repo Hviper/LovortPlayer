@@ -2,6 +2,23 @@ import XCTest
 @testable import LovortPlayerCore
 
 final class SubtitlePipelineTests: XCTestCase {
+    func testMacSubtitlePollingRecoversAfterTransientTimeout() async throws {
+        let attempts = LANMacRetryAttemptCounter()
+        let service = LANMacSubtitleService(
+            session: .shared,
+            pollInterval: .zero,
+            sleeper: { _ in }
+        )
+
+        let result: String = try await service.retryTransientNetworkOperation(onProgress: nil) {
+            try await attempts.next()
+        }
+
+        XCTAssertEqual(result, "reconnected")
+        let attemptCount = await attempts.count
+        XCTAssertEqual(attemptCount, 2)
+    }
+
     func testMacSubtitleAddressOnlyAcceptsLocalNetworkHosts() {
         let previous = LANMacSubtitleSettings.address
         defer { LANMacSubtitleSettings.address = previous }
@@ -272,5 +289,15 @@ final class SubtitlePipelineTests: XCTestCase {
         )
 
         XCTAssertEqual(order, [4, 1, 5, 0])
+    }
+}
+
+private actor LANMacRetryAttemptCounter {
+    private(set) var count = 0
+
+    func next() throws -> String {
+        count += 1
+        if count == 1 { throw URLError(.timedOut) }
+        return "reconnected"
     }
 }
