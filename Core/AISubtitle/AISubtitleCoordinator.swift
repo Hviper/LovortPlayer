@@ -194,6 +194,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false,
         isPrivate: Bool = false,
+        macJobID: UUID? = nil,
         onProgress: (@Sendable (String) -> Void)? = nil,
         onTranscriptionProgress: (@Sendable (_ completedChunks: Int, _ totalChunks: Int) async -> Void)? = nil,
         onPartialResult: (@Sendable ([SubtitleLine]) async -> Void)? = nil,
@@ -342,9 +343,14 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                         completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
                         onProgress: onProgress, onEvent: onEvent, onPartialResult: partialHandler)
                 } else {
+                    guard let macJobID else {
+                        throw NSError(domain: "LANMacSubtitle", code: -2,
+                            userInfo: [NSLocalizedDescriptionKey: "Mac 字幕任务缺少任务 ID"])
+                    }
                     originalLines = try await lanMacService.transcribeProgressively(
                         audioURL: readable, sourceLanguage: sourceLanguage,
-                        preferredStartTime: preferredStartTime, existingLines: initialLines,
+                        jobID: macJobID, preferredStartTime: preferredStartTime,
+                        existingLines: initialLines,
                         completedChunkIndexes: Set(resumableDocument?.completedChunkIndexes ?? []),
                         onProgress: onProgress, onEvent: onEvent, onPartialResult: partialHandler)
                 }

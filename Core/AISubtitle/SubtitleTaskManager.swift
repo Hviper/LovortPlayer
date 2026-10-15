@@ -367,6 +367,7 @@ public final class SubtitleTaskManager: ObservableObject {
                 preferredStartTime: snapshot.preferredStartTime,
                 forceRegenerate: false,
                 isPrivate: snapshot.isPrivate == true,
+                macJobID: snapshot.engine == .lanMac ? snapshot.id : nil,
                 onProgress: { [weak self] status in
                     Task { @MainActor in self?.applyStatus(status, to: id, runToken: runToken) }
                 },
@@ -482,6 +483,32 @@ public final class SubtitleTaskManager: ObservableObject {
         for task in tasks where task.isPrivate == true { liveSubtitles[videoKey(task.videoURL)] = nil }
     }
 
+    public func suspendForBackground() {
+        let activeIDs = tasks.filter { $0.phase.isActive }.map(\.id)
+        for id in activeIDs {
+            guard let index = index(of: id) else { continue }
+            tasks[index].phase = .pausedBySystem
+            tasks[index].statusText = tasks[index].engine == .lanMac
+                ? "Mac 继续转写，返回 App 后领取结果"
+                : "锁屏期间暂停，返回 App 后从检查点继续"
+            tasks[index].updatedAt = Date()
+            runTokens[id] = nil
+            runPermits[id]?.invalidate()
+        }
+        workerTask?.cancel()
+        flushTasks()
+    }
+
+    public func resumeAfterForeground() {
+        for index in tasks.indices where tasks[index].phase == .pausedBySystem {
+            tasks[index].phase = .queued
+            tasks[index].statusText = "正在从已保存进度继续"
+            tasks[index].updatedAt = Date()
+        }
+        flushTasks()
+        pumpQueue()
+    }
+
     private func update(_ id: UUID, mutation: (inout SubtitleTaskItem) -> Void) {
         guard let index = index(of: id) else { return }
         mutation(&tasks[index])
@@ -533,7 +560,7 @@ public final class SubtitleTaskManager: ObservableObject {
         guard let data = try? encoder.encode(tasks) else { return }
         try? data.write(to: storeURL, options: .atomic)
         #if os(iOS)
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: storeURL.path)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: storeURL.path)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         var protectedURL = storeURL

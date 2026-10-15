@@ -39,7 +39,7 @@ public struct LANMacSubtitleSettingsView: View {
                 if !status.isEmpty { Text(status).font(.footnote) }
             }
             Section {
-                Text("在 Mac 上启动字幕服务后，填写其局域网 IP 和启动时显示的口令。选择“局域网 Mac 转写”后，仅上传当前选中的音轨分片；原文和译文仍保存在手机。")
+                Text("在 Mac 上启动字幕服务后，填写其局域网 IP 和启动时显示的口令。选择“局域网 Mac 转写”后，会先上传当前选中的完整音轨；Mac 接收完成后可锁屏，原文和译文仍保存在手机。")
                 Text("当前连接使用局域网 HTTP，请仅在可信的家庭网络中使用。私密视频不能发送到 Mac。")
             }
         }

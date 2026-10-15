@@ -4,19 +4,20 @@
 import argparse
 import hmac
 import json
+import math
 import os
 import secrets
 import tempfile
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from jobs import JobStore, MODEL_LOCK
 
 
 MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 MODEL_ID = "mlx-whisper-large-v3-turbo"
 MAX_AUDIO_BYTES = 32 * 1024 * 1024
-MODEL_LOCK = threading.Lock()
+MAX_JOB_AUDIO_BYTES = 512 * 1024 * 1024
 
 
 def load_token(path: Path) -> str:
@@ -50,16 +51,26 @@ class SubtitleHandler(BaseHTTPRequestHandler):
         if not self.authorized():
             self.send_json(401, {"error": "Unauthorized"})
             return
-        if urlparse(self.path).path != "/health":
-            self.send_json(404, {"error": "Not found"})
+        path = urlparse(self.path).path
+        if path == "/health":
+            self.send_json(200, {"service": "lovort-mac-subtitles", "version": 2, "model": MODEL_ID})
             return
-        self.send_json(200, {"service": "lovort-mac-subtitles", "version": 1, "model": MODEL_ID})
+        if path.startswith("/jobs/"):
+            job_id = JobStore.valid_id(path.removeprefix("/jobs/"))
+            if job_id:
+                job = self.server.job_store.get(job_id)
+                self.send_json(200 if job else 404, job or {"error": "Job not found"})
+                return
+        self.send_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
         if not self.authorized():
             self.send_json(401, {"error": "Unauthorized"})
             return
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/jobs/"):
+            self.submit_job(parsed)
+            return
         if parsed.path != "/transcribe":
             self.send_json(404, {"error": "Not found"})
             return
@@ -107,6 +118,33 @@ class SubtitleHandler(BaseHTTPRequestHandler):
                 Path(file_path).unlink(missing_ok=True)
             MODEL_LOCK.release()
 
+    def submit_job(self, parsed) -> None:
+        job_id = JobStore.valid_id(parsed.path.removeprefix("/jobs/"))
+        if not job_id:
+            self.send_json(400, {"error": "Invalid job ID"})
+            return
+        length_text = self.headers.get("Content-Length", "")
+        if not length_text.isdecimal() or not 0 < int(length_text) <= MAX_JOB_AUDIO_BYTES:
+            self.send_json(413, {"error": "Audio must be 1-512 MiB"})
+            return
+        language = parse_qs(parsed.query).get("language", [None])[0]
+        if language not in (None, "ja", "en", "zh", "ko"):
+            self.send_json(400, {"error": "Unsupported language"})
+            return
+        try:
+            preferred_start = float(parse_qs(parsed.query).get("preferred_start", ["0"])[0])
+        except ValueError:
+            preferred_start = float("nan")
+        if not math.isfinite(preferred_start) or preferred_start < 0:
+            self.send_json(400, {"error": "Invalid preferred start time"})
+            return
+        try:
+            self.connection.settimeout(120)
+            job = self.server.job_store.submit(job_id, self.rfile, int(length_text), language, preferred_start)
+            self.send_json(202, job)
+        except (ValueError, OSError) as error:
+            self.send_json(400, {"error": str(error)})
+
     def log_exception(self) -> None:
         import traceback
         traceback.print_exc()
@@ -124,6 +162,7 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--token-file", type=Path, default=Path.home() / ".config/lovort-mac-subtitles/token")
+    parser.add_argument("--jobs-dir", type=Path, default=Path.home() / ".local/share/lovort-mac-subtitles/jobs")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
@@ -134,6 +173,7 @@ def main() -> None:
     token = load_token(args.token_file)
     server = ThreadingHTTPServer((args.host, args.port), SubtitleHandler)
     server.access_token = token
+    server.job_store = JobStore(args.jobs_dir)
     server.daemon_threads = True
     print(f"Mac subtitle service listening on {args.host}:{args.port}")
     print(f"Access token: {token}")

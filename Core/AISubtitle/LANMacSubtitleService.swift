@@ -74,17 +74,29 @@ public actor LANMacSubtitleService {
 
     private struct Health: Decodable {
         let service: String
+        let version: Int
         let model: String
     }
 
     private struct Segment: Decodable {
+        let chunk: Int
         let start: Double
         let end: Double
         let text: String
     }
 
-    private struct Transcription: Decodable {
+    private struct RemoteJob: Decodable {
+        let status: String
+        let completedChunks: [Int]
+        let totalChunks: Int
         let segments: [Segment]
+        let error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status, segments, error
+            case completedChunks = "completed_chunks"
+            case totalChunks = "total_chunks"
+        }
     }
 
     public init() {}
@@ -97,7 +109,8 @@ public actor LANMacSubtitleService {
         let (data, response) = try await URLSession.shared.data(for: request)
         try check(response: response, data: data)
         let health = try JSONDecoder().decode(Health.self, from: data)
-        guard health.service == "lovort-mac-subtitles", health.model == Self.modelIdentifier else {
+        guard health.service == "lovort-mac-subtitles", health.version >= 2,
+              health.model == Self.modelIdentifier else {
             throw LANMacSubtitleSettings.error("Mac 服务版本或模型不匹配")
         }
         return "Mac 字幕服务已连接 · Large V3 Turbo"
@@ -106,6 +119,7 @@ public actor LANMacSubtitleService {
     func transcribeProgressively(
         audioURL: URL,
         sourceLanguage: SubtitleSourceLanguage,
+        jobID: UUID,
         preferredStartTime: TimeInterval,
         existingLines: [SubtitleLine],
         completedChunkIndexes: Set<Int>,
@@ -115,58 +129,67 @@ public actor LANMacSubtitleService {
     ) async throws -> [SubtitleLine] {
         let (baseURL, token) = try configuration()
         _ = try await testConnection()
-        let asset = AVURLAsset(url: audioURL)
-        let tracks = try await asset.loadTracks(withMediaType: .audio)
-        guard let track = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage).first else {
-            throw LANMacSubtitleSettings.error("视频中没有可用音轨")
+        var job = try await fetchJob(jobID, from: baseURL, token: token)
+        if job == nil || job?.status == "failed" {
+            let asset = AVURLAsset(url: audioURL)
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let track = AudioTrackSelection.orderedTracks(tracks, sourceLanguage: sourceLanguage).first else {
+                throw LANMacSubtitleSettings.error("视频中没有可用音轨")
+            }
+            let range = try await track.load(.timeRange)
+            let duration = CMTimeGetSeconds(range.duration)
+            guard duration.isFinite, duration > 0 else { throw LANMacSubtitleSettings.error("无法读取音频时长") }
+            let audioFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent("lovort-mac-job-\(jobID.uuidString).m4a")
+            defer { try? FileManager.default.removeItem(at: audioFile) }
+            onEvent?(.phase(.preparingAudio))
+            onProgress?("正在准备所选音轨，请保持 App 前台…")
+            try await exporter.exportAudioSlice(mediaURL: audioURL, sourceLanguage: sourceLanguage,
+                start: 0, duration: duration, outputURL: audioFile)
+            try Task.checkCancellation()
+            let size = (try audioFile.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
+            guard size > 0, size <= 512 * 1_024 * 1_024 else {
+                throw LANMacSubtitleSettings.error("音轨超过 Mac 服务 512 MiB 上传限制")
+            }
+            onProgress?("正在上传音轨，请保持 App 前台…")
+            job = try await submit(audioFile, jobID: jobID, to: baseURL,
+                token: token, language: sourceLanguage.whisperCode,
+                preferredStartTime: preferredStartTime)
         }
-        let trackRange = try await track.load(.timeRange)
-        let duration = CMTimeGetSeconds(trackRange.duration)
-        guard duration.isFinite, duration > 0 else { throw LANMacSubtitleSettings.error("无法读取音频时长") }
+        onEvent?(.phase(.transcribing))
+        onProgress?("Mac 已接收音轨；现在可以锁屏，返回后会自动领取字幕")
+
         let chunkDuration = LocalWhisperSubtitleService.chunkDuration
-        let total = max(1, Int(ceil(duration / chunkDuration)))
-        let preferred = max(0, min(total - 1, Int(preferredStartTime / chunkDuration)))
-        let pending = LocalWhisperSubtitleService.chunkProcessingOrder(
-            totalChunks: total, preferredChunk: preferred, completed: completedChunkIndexes)
         var lines = existingLines
         var completed = completedChunkIndexes
-        if let updated = await onPartialResult?(LocalWhisperSubtitleService.ProgressiveUpdate(
-            lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: total,
-            latestChunkIndex: -1, latestChunkLines: [])) { lines = updated }
-
-        for index in pending {
+        while true {
             try Task.checkCancellation()
-            let start = Double(index) * chunkDuration
-            let length = min(chunkDuration, duration - start)
-            let sliceURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lovort-mac-\(UUID().uuidString).m4a")
-            defer { try? FileManager.default.removeItem(at: sliceURL) }
-            onEvent?(.phase(.preparingAudio))
-            onProgress?("正在提取第 \(completed.count + 1)/\(total) 个音频分片…")
-            try await exporter.exportAudioSlice(mediaURL: audioURL, sourceLanguage: sourceLanguage,
-                start: start, duration: length, outputURL: sliceURL)
-            try Task.checkCancellation()
-            onEvent?(.phase(.transcribing))
-            onProgress?("Mac 正在转写第 \(completed.count + 1)/\(total) 个分片…")
-            let result = try await upload(sliceURL, to: baseURL, token: token,
-                language: sourceLanguage.whisperCode)
-            try Task.checkCancellation()
-            let chunkLines = result.segments.compactMap { segment -> SubtitleLine? in
-                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty, segment.start.isFinite, segment.end.isFinite,
-                      segment.start >= 0, segment.end > segment.start,
-                      segment.end <= length + 1 else { return nil }
-                return SubtitleLine(startTime: start + segment.start,
-                    endTime: start + min(segment.end, length), originalText: text)
+            guard let current = job else { throw LANMacSubtitleSettings.error("Mac 字幕任务不存在，请重试") }
+            if current.status == "failed" {
+                throw LANMacSubtitleSettings.error("Mac 转写失败：\(current.error ?? "未知错误")")
             }
-            lines.removeAll { $0.startTime >= start && $0.startTime < start + length }
-            lines.append(contentsOf: chunkLines)
-            lines.sort { $0.startTime < $1.startTime }
-            completed.insert(index)
-            onEvent?(.transcription(completed: completed.count, total: total))
-            if let updated = await onPartialResult?(LocalWhisperSubtitleService.ProgressiveUpdate(
-                lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: total,
-                latestChunkIndex: index, latestChunkLines: chunkLines)) { lines = updated }
+            let total = max(1, current.totalChunks)
+            for index in current.completedChunks.sorted() where !completed.contains(index) {
+                let start = Double(index) * chunkDuration
+                let chunkLines = current.segments.filter { $0.chunk == index }.compactMap { segment -> SubtitleLine? in
+                    let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty, segment.start.isFinite, segment.end.isFinite,
+                          segment.start >= start, segment.end > segment.start,
+                          segment.end <= start + chunkDuration + 1 else { return nil }
+                    return SubtitleLine(startTime: segment.start, endTime: segment.end, originalText: text)
+                }
+                lines.removeAll { $0.startTime >= start && $0.startTime < start + chunkDuration }
+                lines.append(contentsOf: chunkLines)
+                lines.sort { $0.startTime < $1.startTime }
+                completed.insert(index)
+                onEvent?(.transcription(completed: completed.count, total: total))
+                if let updated = await onPartialResult?(LocalWhisperSubtitleService.ProgressiveUpdate(
+                    lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: total,
+                    latestChunkIndex: index, latestChunkLines: chunkLines)) { lines = updated }
+            }
+            if current.status == "completed" { break }
+            try await Task.sleep(for: .seconds(4))
+            job = try await fetchJob(jobID, from: baseURL, token: token)
         }
         guard !lines.isEmpty else { throw LANMacSubtitleSettings.error("Mac 未检测到清晰人声") }
         return lines
@@ -179,17 +202,39 @@ public actor LANMacSubtitleService {
         return (url, token)
     }
 
-    private func upload(_ file: URL, to baseURL: URL, token: String, language: String?) async throws -> Transcription {
-        var components = URLComponents(url: baseURL.appendingPathComponent("transcribe"), resolvingAgainstBaseURL: false)!
-        if let language { components.queryItems = [URLQueryItem(name: "language", value: language)] }
-        var request = URLRequest(url: components.url!)
+    private func jobURL(_ id: UUID, baseURL: URL, language: String? = nil,
+                        preferredStartTime: TimeInterval? = nil) -> URL {
+        var components = URLComponents(url: baseURL.appendingPathComponent("jobs/\(id.uuidString)"), resolvingAgainstBaseURL: false)!
+        var items: [URLQueryItem] = []
+        if let language { items.append(URLQueryItem(name: "language", value: language)) }
+        if let preferredStartTime, preferredStartTime.isFinite {
+            items.append(URLQueryItem(name: "preferred_start", value: String(max(0, preferredStartTime))))
+        }
+        if !items.isEmpty { components.queryItems = items }
+        return components.url!
+    }
+
+    private func fetchJob(_ id: UUID, from baseURL: URL, token: String) async throws -> RemoteJob? {
+        var request = URLRequest(url: jobURL(id, baseURL: baseURL))
+        request.setValue(token, forHTTPHeaderField: "X-Lovort-Token")
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if (response as? HTTPURLResponse)?.statusCode == 404 { return nil }
+        try check(response: response, data: data)
+        return try JSONDecoder().decode(RemoteJob.self, from: data)
+    }
+
+    private func submit(_ file: URL, jobID: UUID, to baseURL: URL,
+                        token: String, language: String?, preferredStartTime: TimeInterval) async throws -> RemoteJob {
+        var request = URLRequest(url: jobURL(jobID, baseURL: baseURL, language: language,
+            preferredStartTime: preferredStartTime))
         request.httpMethod = "POST"
         request.timeoutInterval = 900
         request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: "X-Lovort-Token")
         let (data, response) = try await URLSession.shared.upload(for: request, fromFile: file)
         try check(response: response, data: data)
-        return try JSONDecoder().decode(Transcription.self, from: data)
+        return try JSONDecoder().decode(RemoteJob.self, from: data)
     }
 
     private func check(response: URLResponse, data: Data) throws {

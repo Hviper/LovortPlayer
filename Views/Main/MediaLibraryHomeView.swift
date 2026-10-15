@@ -286,9 +286,11 @@ public struct MediaLibraryHomeView: View {
                     showVaultUnlocked = false
                     if filterTab == 2 { filterTab = 0 }
                     subtitleTasks.pausePrivateTasks()
-                    subtitleTasks.flushTasks()
+                    subtitleTasks.suspendForBackground()
                     PlaybackHistoryManager.shared.flush()
                     MediaIdentityStore.shared.flush()
+                } else if phase == .active {
+                    subtitleTasks.resumeAfterForeground()
                 }
             }
             .onChange(of: filterTab) { old, new in
