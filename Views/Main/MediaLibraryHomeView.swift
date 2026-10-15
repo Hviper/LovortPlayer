@@ -75,6 +75,11 @@ public struct MediaLibraryHomeView: View {
         return Array(filteredVideos.filter { $0.lastPlayedPosition > 2 }.sorted { PlaybackHistoryManager.shared.lastPlayedDate(for: $0.fileURL) > PlaybackHistoryManager.shared.lastPlayedDate(for: $1.fileURL) }.prefix(3))
     }
 
+    private var remainingVideos: [VideoItem] {
+        let continuedIDs = Set(continueWatching.map(\.id))
+        return filteredVideos.filter { !continuedIDs.contains($0.id) }
+    }
+
     public var body: some View {
         NavigationStack {
             ZStack {
@@ -139,27 +144,14 @@ public struct MediaLibraryHomeView: View {
                                 if !continueWatching.isEmpty {
                                     Text("继续观看").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
                                     ForEach(continueWatching) { video in
-                                        VideoCardView(video: video, onSelect: { selectedVideo = video })
+                                        videoCard(for: video)
                                     }
-                                    Text("全部视频").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                    if !remainingVideos.isEmpty {
+                                        Text("其他视频").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
                                 }
-                                ForEach(filteredVideos) { video in
-                                    VideoCardView(
-                                        video: video,
-                                        onSelect: {
-                                            selectedVideo = video
-                                        },
-                                        onToggleHide: {
-                                            Task {
-                                                if !vault.hasPassword { pendingVaultMove = video; showVaultSetup = true; return }
-                                                do { try await libraryManager.toggleHideVideo(video) }
-                                                catch { libraryManager.showNotification(message: error.localizedDescription, isError: true) }
-                                            }
-                                        },
-                                        onDelete: {
-                                            pendingDelete = video
-                                        }
-                                    )
+                                ForEach(remainingVideos) { video in
+                                    videoCard(for: video)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -359,6 +351,21 @@ public struct MediaLibraryHomeView: View {
         .translationTask(selectedVideo == nil ? appleTranslation.configuration : nil) { session in
             await appleTranslation.perform(using: session)
         }
+    }
+
+    private func videoCard(for video: VideoItem) -> some View {
+        VideoCardView(
+            video: video,
+            onSelect: { selectedVideo = video },
+            onToggleHide: {
+                Task {
+                    if !vault.hasPassword { pendingVaultMove = video; showVaultSetup = true; return }
+                    do { try await libraryManager.toggleHideVideo(video) }
+                    catch { libraryManager.showNotification(message: error.localizedDescription, isError: true) }
+                }
+            },
+            onDelete: { pendingDelete = video }
+        )
     }
 
     private var supportedVideoContentTypes: [UTType] {
