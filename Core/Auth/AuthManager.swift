@@ -457,12 +457,12 @@ public final class AuthManager: NSObject, ObservableObject, ASWebAuthenticationP
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    public func accessTokenForRequests() async throws -> String? {
+    public func accessTokenForRequests(forceRefresh: Bool = false) async throws -> String? {
         guard var profile = currentProfile, profile.provider == .chatgpt, profile.isLoggedIn else { return nil }
         guard profile.canUseChatGPTPlan else {
             throw authError("当前登录记录没有 ChatGPT 计划使用权限，请退出后重新登录授权")
         }
-        if let expiresAt = profile.expiresAt, expiresAt > Date().addingTimeInterval(90) {
+        if !forceRefresh, let expiresAt = profile.expiresAt, expiresAt > Date().addingTimeInterval(90) {
             return profile.accessToken
         }
         guard let refreshToken = profile.refreshToken,

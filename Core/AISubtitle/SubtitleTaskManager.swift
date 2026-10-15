@@ -57,6 +57,7 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
     public var engine: AISubtitleEngineType
     public var model: OfflineWhisperModel
     public var translationProvider: SubtitleTranslationProviderType
+    public var openAIConfiguration: OpenAITranslationExecutionConfiguration? = nil
     public var enhanceWithGPT: Bool
     public var isPrivate: Bool?
     public var preferredStartTime: TimeInterval
@@ -80,6 +81,7 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
         engine: AISubtitleEngineType,
         model: OfflineWhisperModel,
         translationProvider: SubtitleTranslationProviderType,
+        openAIConfiguration: OpenAITranslationExecutionConfiguration? = nil,
         enhanceWithGPT: Bool
     ) -> Bool {
         self.sourceLanguage == sourceLanguage
@@ -87,6 +89,7 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
             && self.engine == engine
             && self.model == model
             && self.translationProvider == translationProvider
+            && self.openAIConfiguration == openAIConfiguration
             && self.enhanceWithGPT == enhanceWithGPT
     }
 }
@@ -152,6 +155,9 @@ public final class SubtitleTaskManager: ObservableObject {
         let selectedModel = model ?? AISubtitleCoordinator.shared.offlineModel
         let selectedProvider = AISubtitleCoordinator.shared.effectiveTranslationProvider(translationProvider ?? AISubtitleCoordinator.shared.translationProvider)
         let selectedEnhancement = enhanceWithGPT ?? AISubtitleCoordinator.shared.isGPTEnhancementEnabled
+        let openAIConfiguration = selectedProvider == .openAI || selectedEnhancement
+            ? AISubtitleCoordinator.shared.currentOpenAIConfiguration()
+            : nil
         if let index = tasks.firstIndex(where: {
             videoKey($0.videoURL) == videoKey(videoURL) && $0.phase.isActive
         }) {
@@ -162,6 +168,7 @@ public final class SubtitleTaskManager: ObservableObject {
                    engine: engine,
                    model: selectedModel,
                    translationProvider: selectedProvider,
+                   openAIConfiguration: openAIConfiguration,
                    enhanceWithGPT: selectedEnhancement
                ) {
                 tasks[index].preferredStartTime = preferredStartTime
@@ -181,10 +188,13 @@ public final class SubtitleTaskManager: ObservableObject {
                engine: engine,
                model: selectedModel,
                translationProvider: selectedProvider,
+               openAIConfiguration: openAIConfiguration,
                enhanceWithGPT: selectedEnhancement
            ),
            let cached = SubtitleCacheStore().load(for: videoURL),
-           cached.translationConfiguration == TranslationAPISettings(provider: selectedProvider).cacheIdentity {
+           cached.translationConfiguration == TranslationAPISettings(provider: selectedProvider)
+                .effectiveCacheIdentity(openAIConfiguration: openAIConfiguration,
+                                        enhanceWithGPT: selectedEnhancement) {
             return existing.id
         }
 
@@ -198,6 +208,7 @@ public final class SubtitleTaskManager: ObservableObject {
                        engine: engine,
                        model: selectedModel,
                        translationProvider: selectedProvider,
+                       openAIConfiguration: openAIConfiguration,
                        enhanceWithGPT: selectedEnhancement
                    )
            }) {
@@ -232,6 +243,7 @@ public final class SubtitleTaskManager: ObservableObject {
             engine: engine,
             model: selectedModel,
             translationProvider: selectedProvider,
+            openAIConfiguration: openAIConfiguration,
             enhanceWithGPT: selectedEnhancement,
             isPrivate: isPrivate,
             preferredStartTime: preferredStartTime,
@@ -263,6 +275,19 @@ public final class SubtitleTaskManager: ObservableObject {
 
     public func resume(_ id: UUID) {
         guard let index = index(of: id) else { return }
+        if requiresOpenAIConfiguration(tasks[index]),
+           tasks[index].openAIConfiguration?.credentialFingerprint == nil {
+            let configuration = AISubtitleCoordinator.shared.currentOpenAIConfiguration()
+            guard configuration.credentialFingerprint != nil else {
+                tasks[index].phase = .failed
+                tasks[index].statusText = "请先登录 ChatGPT 订阅账户或填写 Platform API Key"
+                tasks[index].errorMessage = "配置凭证后再点击重试，任务会绑定当前账户和模型"
+                tasks[index].updatedAt = Date()
+                saveTasks()
+                return
+            }
+            tasks[index].openAIConfiguration = configuration
+        }
         tasks[index].phase = .queued
         tasks[index].statusText = "等待继续处理"
         tasks[index].errorMessage = nil
@@ -356,6 +381,15 @@ public final class SubtitleTaskManager: ObservableObject {
         }
 
         do {
+            guard !requiresOpenAIConfiguration(snapshot)
+                    || snapshot.openAIConfiguration?.credentialFingerprint != nil else {
+                throw NSError(
+                    domain: "SubtitleTaskConfiguration",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "GPT 任务未绑定可用账户，请先登录 ChatGPT 或填写 Platform API Key，再点击重试"]
+                )
+            }
             let lines = try await AISubtitleCoordinator.shared.processVideo(
                 videoURL: snapshot.videoURL,
                 targetLanguage: snapshot.targetLanguage,
@@ -364,6 +398,7 @@ public final class SubtitleTaskManager: ObservableObject {
                 model: snapshot.model,
                 translationProvider: snapshot.translationProvider,
                 enhanceWithGPT: snapshot.enhanceWithGPT,
+                openAIConfiguration: snapshot.openAIConfiguration,
                 preferredStartTime: snapshot.preferredStartTime,
                 forceRegenerate: false,
                 isPrivate: snapshot.isPrivate == true,
@@ -522,11 +557,23 @@ public final class SubtitleTaskManager: ObservableObject {
 
     private func resumeInterruptedTasks() {
         for index in tasks.indices where tasks[index].phase.isActive || tasks[index].phase == .pausedBySystem {
+            if requiresOpenAIConfiguration(tasks[index]),
+               tasks[index].openAIConfiguration?.credentialFingerprint == nil {
+                tasks[index].phase = .failed
+                tasks[index].statusText = "配置已升级，请点击重试后使用当前 GPT 账户和模型"
+                tasks[index].errorMessage = "为避免静默切换计费通道，旧任务需要您确认后继续"
+                tasks[index].updatedAt = Date()
+                continue
+            }
             tasks[index].phase = .queued
             tasks[index].statusText = "正在从上次检查点恢复"
             tasks[index].updatedAt = Date()
         }
         saveTasks()
+    }
+
+    private func requiresOpenAIConfiguration(_ item: SubtitleTaskItem) -> Bool {
+        item.translationProvider == .openAI || item.enhanceWithGPT
     }
 
     private func trimHistory() {

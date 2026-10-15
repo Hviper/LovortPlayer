@@ -67,6 +67,7 @@ private final class SubtitlePreviewController: ObservableObject {
 public struct AISubtitleSettingsSheet: View {
     @ObservedObject var viewModel: PlayerViewModel
     @ObservedObject private var modelManager = AIModelManager.shared
+    @StateObject private var authManager = AuthManager.shared
     @Environment(\.dismiss) private var dismiss
 
     @ObservedObject private var display = SubtitleDisplayPreferences.shared
@@ -85,6 +86,8 @@ public struct AISubtitleSettingsSheet: View {
     @State private var communityMatchStatus: String = ""
     @State private var showCustomModelSheet: Bool = false
     @State private var customModelText: String = ""
+    @State private var isLoggingIn = false
+    @State private var loginMessage: String?
     @StateObject private var preview = SubtitlePreviewController()
 
     public init(viewModel: PlayerViewModel) {
@@ -103,7 +106,10 @@ public struct AISubtitleSettingsSheet: View {
                         subtitleDisplaySettings
                         DisclosureGroup("翻译服务与高级选项") {
                             translationProviderSection
-                            if selectedTranslationProvider == .openAI || enhanceWithGPT { modelSelectionSection }
+                            if selectedTranslationProvider == .openAI || enhanceWithGPT {
+                                chatGPTSubscriptionSection
+                                modelSelectionSection
+                            }
                             Picker("识别并行数", selection: $workerCount) {
                                 Text("1（省内存）").tag(1); Text("2").tag(2); Text("4").tag(4)
                             }
@@ -139,7 +145,7 @@ public struct AISubtitleSettingsSheet: View {
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("输入 OpenAI Platform 项目可用的模型 ID，设定后用于影视字幕翻译或语境精修。")
+                Text("输入当前 OpenAI Platform 或 ChatGPT 订阅通道可用的模型 ID，设定后用于影视字幕翻译或语境精修。")
             }
             .onAppear {
                 if let url = viewModel.currentVideoURL {
@@ -176,11 +182,11 @@ public struct AISubtitleSettingsSheet: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.6))
                 Spacer()
-                if modelManager.isFetchingModels {
+                if apiKey.hasPrefix("sk-"), modelManager.isFetchingModels {
                     ProgressView()
                         .scaleEffect(0.7)
                         .tint(.white.opacity(0.7))
-                } else {
+                } else if apiKey.hasPrefix("sk-") {
                     Button(action: {
                         Task {
                             await modelManager.fetchAvailableModels(token: apiKey)
@@ -263,9 +269,15 @@ public struct AISubtitleSettingsSheet: View {
                 )
             }
 
-            TranslationConnectionTestView(configuration: TranslationConnectionConfiguration(
-                settings: TranslationAPISettings(provider: .openAI), apiKey: apiKey,
-                openAIModel: modelManager.selectedModelID))
+            if apiKey.hasPrefix("sk-") {
+                TranslationConnectionTestView(configuration: TranslationConnectionConfiguration(
+                    settings: TranslationAPISettings(provider: .openAI), apiKey: apiKey,
+                    openAIModel: modelManager.selectedModelID))
+            } else if authManager.currentProfile?.canUseChatGPTPlan == true {
+                Label("当前模型将通过 ChatGPT 订阅通道调用", systemImage: "checkmark.shield.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.green.opacity(0.9))
+            }
 
             if let msg = modelManager.fetchMessage {
                 Text(msg)
@@ -601,7 +613,7 @@ public struct AISubtitleSettingsSheet: View {
                         }
                 }
             } else {
-                Text("需要 OpenAI Platform API Key。ChatGPT Plus/Pro 订阅与 API 额度分别计费，不能直接替代 API Key。")
+                Text("可使用 ChatGPT 订阅登录，或填写 OpenAI Platform API Key。订阅用于 GPT 文本翻译与精修，不用于 Whisper 音频转写。")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
             }
@@ -612,7 +624,7 @@ public struct AISubtitleSettingsSheet: View {
                         Text("生成后用 GPT 做影视语境精修")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(.white)
-                        Text("可选：统一人物称谓、敬语、俚语和角色口吻；需要 OpenAI Platform API Key")
+                        Text("可选：统一人物称谓、敬语、俚语和角色口吻；支持 ChatGPT 订阅或 Platform API Key")
                             .font(.system(size: 10))
                             .foregroundColor(.white.opacity(0.45))
                     }
@@ -625,6 +637,77 @@ public struct AISubtitleSettingsSheet: View {
         }
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.06)))
+    }
+
+    private var chatGPTSubscriptionSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("ChatGPT 订阅", systemImage: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                Spacer()
+                if authManager.currentProfile?.canUseChatGPTPlan == true {
+                    Text("已连接")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.green)
+                }
+            }
+
+            if let profile = authManager.currentProfile, profile.isLoggedIn {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(profile.email)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                        Text(profile.canUseChatGPTPlan
+                             ? "可用于字幕翻译和影视语境精修"
+                             : "当前授权未包含 ChatGPT 模型使用权限")
+                            .font(.system(size: 11))
+                            .foregroundColor(profile.canUseChatGPTPlan ? .green.opacity(0.85) : .orange)
+                    }
+                    Spacer()
+                    Button("退出") {
+                        authManager.logout()
+                        loginMessage = nil
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.65))
+                }
+            } else {
+                Button {
+                    startChatGPTLogin()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isLoggingIn {
+                            ProgressView().tint(.white)
+                        } else {
+                            Image(systemName: "safari.fill")
+                        }
+                        Text(isLoggingIn ? "正在打开登录…" : "通过 Safari 登录 ChatGPT")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.white)
+                .background(AppSettings.shared.themeColor.color.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                .disabled(isLoggingIn)
+            }
+
+            Text("订阅登录仅用于 GPT 文本翻译与精修；离线或 Mac 转写不需要登录，OpenAI 云端音频转写仍需 Platform API Key。")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let loginMessage {
+                Text(loginMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(authManager.currentProfile?.canUseChatGPTPlan == true ? .green : .orange)
+            }
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var subtitleDisplaySettings: some View {
@@ -705,10 +788,10 @@ public struct AISubtitleSettingsSheet: View {
         )
     }
 
-    // MARK: - 5. 手动 API Key (备用方式)
+    // MARK: - 5. Platform API Key
     private var manualApiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("OpenAI Platform API Key")
+            Text("OpenAI Platform API Key（可选）")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.5))
 
@@ -720,12 +803,30 @@ public struct AISubtitleSettingsSheet: View {
                 .onChange(of: apiKey) { newValue in
                     AISubtitleCoordinator.shared.saveOpenAIKey(newValue)
                 }
+            Text("填写后优先使用 API；留空时，GPT 翻译与精修使用上方 ChatGPT 订阅登录。")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.4))
         }
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color.white.opacity(0.06))
         )
+    }
+
+    private func startChatGPTLogin() {
+        Task {
+            isLoggingIn = true
+            defer { isLoggingIn = false }
+            do {
+                let profile = try await authManager.startWebAuthLogin(provider: .chatgpt)
+                loginMessage = profile.canUseChatGPTPlan
+                    ? "ChatGPT 订阅已连接"
+                    : "登录成功，但账户未授予模型使用权限"
+            } catch {
+                loginMessage = "登录未完成：\(error.localizedDescription)"
+            }
+        }
     }
 
     private func saveProxy() {

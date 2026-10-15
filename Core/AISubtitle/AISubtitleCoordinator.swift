@@ -191,6 +191,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         model: OfflineWhisperModel? = nil,
         translationProvider: SubtitleTranslationProviderType? = nil,
         enhanceWithGPT: Bool? = nil,
+        openAIConfiguration: OpenAITranslationExecutionConfiguration? = nil,
         preferredStartTime: TimeInterval = 0,
         forceRegenerate: Bool = false,
         isPrivate: Bool = false,
@@ -212,6 +213,21 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         let selectedTranslationProvider = effectiveTranslationProvider(translationProvider ?? self.translationProvider)
         let translationSettings = TranslationAPISettings(provider: selectedTranslationProvider)
         let shouldEnhanceWithGPT = enhanceWithGPT ?? isGPTEnhancementEnabled
+        let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedOpenAIConfiguration: OpenAITranslationExecutionConfiguration?
+        if selectedTranslationProvider == .openAI || shouldEnhanceWithGPT {
+            if let openAIConfiguration {
+                resolvedOpenAIConfiguration = openAIConfiguration
+            } else {
+                resolvedOpenAIConfiguration = await currentOpenAIConfiguration(platformKey: platformKey)
+            }
+        } else {
+            resolvedOpenAIConfiguration = nil
+        }
+        let translationCacheIdentity = translationSettings.effectiveCacheIdentity(
+            openAIConfiguration: resolvedOpenAIConfiguration,
+            enhanceWithGPT: shouldEnhanceWithGPT
+        )
 
         let cachedDocument = cacheStore.load(for: videoURL)
         let expectedModel = selectedEngine == .localWhisperKit ? selectedModel.rawValue
@@ -224,7 +240,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                cachedDocument.engine == selectedEngine,
                cachedDocument.model == expectedModel,
                cachedDocument.translationProvider == selectedTranslationProvider,
-               cachedDocument.translationConfiguration == translationSettings.cacheIdentity,
+               cachedDocument.translationConfiguration == translationCacheIdentity,
                cachedDocument.translationComplete != false,
                (cachedDocument.gptEnhanced ?? false) == (selectedTranslationProvider == .openAI || shouldEnhanceWithGPT) {
                 onProgress?("已加载匹配当前配置的本地字幕（共 \(cachedDocument.lines.count) 句）")
@@ -243,7 +259,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                   cachedDocument.sourceLanguage == sourceLanguage.rawValue,
                   cachedDocument.engine == selectedEngine,
                   cachedDocument.model == expectedModel else { return nil }
-            let keepTranslations = cachedDocument.translationConfiguration == translationSettings.cacheIdentity
+            let keepTranslations = cachedDocument.translationConfiguration == translationCacheIdentity
                 && cachedDocument.translationProvider == selectedTranslationProvider
                 && cachedDocument.targetLanguage == targetLanguage
             return cachedDocument.lines.map {
@@ -269,7 +285,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
 
         let initialLines: [SubtitleLine] = {
             guard let resumableDocument else { return [] }
-            let keepTranslations = resumableDocument.translationConfiguration == translationSettings.cacheIdentity
+            let keepTranslations = resumableDocument.translationConfiguration == translationCacheIdentity
                 && resumableDocument.translationProvider == selectedTranslationProvider
                 && resumableDocument.targetLanguage == targetLanguage
             if keepTranslations {
@@ -281,11 +297,11 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             }
         }()
 
-        let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
         let translationService: Result<any SubtitleTranslationProviding, Error>
         do {
             translationService = .success(try await resolveTranslationService(provider: selectedTranslationProvider,
-                platformKey: platformKey, settings: translationSettings))
+                platformKey: platformKey, settings: translationSettings,
+                openAIConfiguration: resolvedOpenAIConfiguration))
         } catch {
             translationService = .failure(error)
         }
@@ -297,7 +313,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             pipeline = ProgressiveTranslationPipeline(service: service, source: sourceLanguage, target: targetLanguage, progress: onEvent) { [cacheStore] lines, completed, total in
                 let document = SubtitleDocument(sourceLanguage: sourceLanguage.rawValue, targetLanguage: targetLanguage,
                     engine: selectedEngine, model: expectedModel, translationProvider: selectedTranslationProvider,
-                    translationConfiguration: translationSettings.cacheIdentity, isComplete: total > 0 && completed.count == total,
+                    translationConfiguration: translationCacheIdentity, isComplete: total > 0 && completed.count == total,
                     translationComplete: false, gptEnhanced: false, completedChunkIndexes: completed,
                     chunkDuration: LocalWhisperSubtitleService.chunkDuration, videoURL: videoURL, lines: lines)
                 _ = try? Self.persist(document, for: videoURL, store: cacheStore, permit: cachePermit)
@@ -324,7 +340,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                             engine: selectedEngine,
                             model: expectedModel,
                             translationProvider: selectedTranslationProvider,
-                            translationConfiguration: translationSettings.cacheIdentity,
+                            translationConfiguration: translationCacheIdentity,
                             isComplete: false,
                             translationComplete: false,
                             gptEnhanced: false,
@@ -417,18 +433,30 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             }
             gptEnhanced = selectedTranslationProvider == .openAI && translationComplete
             if shouldEnhanceWithGPT, selectedTranslationProvider != .openAI, translationComplete {
-                guard platformKey.hasPrefix("sk-") else {
-                    throw NSError(
-                        domain: "AISubtitleError",
-                        code: -14,
-                        userInfo: [NSLocalizedDescriptionKey: "GPT 语境精修需要 OpenAI Platform API Key"]
-                    )
+                guard let configuration = resolvedOpenAIConfiguration else {
+                    throw NSError(domain: "AISubtitleError", code: -14,
+                                  userInfo: [NSLocalizedDescriptionKey: "GPT 精修配置缺失，请重新创建任务"])
                 }
-                finalLines = try await CloudAISubtitleService(apiKey: platformKey).polish(
-                    lines: finalLines,
-                    targetLanguage: targetLanguage,
-                    onProgress: onProgress
-                )
+                if configuration.channel == .platformAPI {
+                    try validatePlatformKey(platformKey, configuration: configuration)
+                    finalLines = try await CloudAISubtitleService(
+                        apiKey: platformKey, textModel: configuration.model
+                    ).polish(
+                        lines: finalLines,
+                        targetLanguage: targetLanguage,
+                        onProgress: onProgress
+                    )
+                } else {
+                    finalLines = try await ChatGPTSubscriptionTranslationProvider(
+                        tokenProvider: { forceRefresh in
+                            try await self.chatGPTSubscriptionToken(
+                                configuration: configuration,
+                                forceRefresh: forceRefresh
+                            )
+                        },
+                        model: configuration.model
+                    ).polish(lines: finalLines, targetLanguage: targetLanguage, onProgress: onProgress)
+                }
                 gptEnhanced = true
             }
         } catch is CancellationError {
@@ -444,7 +472,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             engine: selectedEngine,
             model: expectedModel,
             translationProvider: selectedTranslationProvider,
-            translationConfiguration: translationSettings.cacheIdentity,
+            translationConfiguration: translationCacheIdentity,
             isComplete: true,
             translationComplete: translationComplete,
             gptEnhanced: gptEnhanced,
@@ -579,7 +607,17 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         var warning: String?
         do {
             let platformKey = getSavedOpenAIKey().trimmingCharacters(in: .whitespacesAndNewlines)
-            let service = try await resolveTranslationService(provider: translationProvider, platformKey: platformKey)
+            let openAIConfiguration: OpenAITranslationExecutionConfiguration?
+            if translationProvider == .openAI {
+                openAIConfiguration = await currentOpenAIConfiguration(platformKey: platformKey)
+            } else {
+                openAIConfiguration = nil
+            }
+            let service = try await resolveTranslationService(
+                provider: translationProvider,
+                platformKey: platformKey,
+                openAIConfiguration: openAIConfiguration
+            )
             resultLines = try await service.translate(
                 lines: sourceLines, sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage, onProgress: onProgress
@@ -655,7 +693,8 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
     private func resolveTranslationService(
         provider: SubtitleTranslationProviderType,
         platformKey: String,
-        settings: TranslationAPISettings? = nil
+        settings: TranslationAPISettings? = nil,
+        openAIConfiguration: OpenAITranslationExecutionConfiguration? = nil
     ) async throws -> any SubtitleTranslationProviding {
         let selectedProvider = settings?.provider ?? effectiveTranslationProvider(provider)
         let configuration = settings ?? TranslationAPISettings(provider: selectedProvider)
@@ -663,14 +702,27 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         case .apple:
             return await AppleTranslationBridge.shared
         case .openAI:
-            guard platformKey.hasPrefix("sk-") else {
-                throw NSError(
-                    domain: "AISubtitleError",
-                    code: -13,
-                    userInfo: [NSLocalizedDescriptionKey: "GPT 翻译需要 OpenAI Platform API Key；ChatGPT Plus/Pro 订阅不等同于 API 额度"]
+            let configuration: OpenAITranslationExecutionConfiguration
+            if let openAIConfiguration {
+                configuration = openAIConfiguration
+            } else {
+                configuration = await currentOpenAIConfiguration(platformKey: platformKey)
+            }
+            switch configuration.channel {
+            case .platformAPI:
+                try validatePlatformKey(platformKey, configuration: configuration)
+                return OpenAITranslationProvider(token: platformKey, model: configuration.model)
+            case .chatGPTSubscription:
+                return ChatGPTSubscriptionTranslationProvider(
+                    tokenProvider: { forceRefresh in
+                        try await self.chatGPTSubscriptionToken(
+                            configuration: configuration,
+                            forceRefresh: forceRefresh
+                        )
+                    },
+                    model: configuration.model
                 )
             }
-            return OpenAITranslationProvider(token: platformKey)
         case .volcengineMachineTranslation:
             return VolcengineMachineTranslationProvider(credentials: .saved(for: .volcengineMachineTranslation))
         case .volcengine where configuration.authenticationMode == .accessKey:
@@ -684,6 +736,77 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             let region = UserDefaults.standard.string(forKey: "LovortAzureTranslatorRegion") ?? ""
             return RESTTranslationProvider(provider: provider, apiKey: key, azureRegion: region)
         }
+    }
+
+    @MainActor
+    public func currentOpenAIConfiguration(
+        platformKey: String? = nil
+    ) -> OpenAITranslationExecutionConfiguration {
+        let key = (platformKey ?? getSavedOpenAIKey()).trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = (AIModelManager.shared.selectedModelID, AuthManager.shared.currentProfile)
+        if key.hasPrefix("sk-") {
+            return OpenAITranslationExecutionConfiguration(
+                channel: .platformAPI,
+                model: state.0,
+                credentialFingerprint: OpenAITranslationExecutionConfiguration.fingerprint(key)
+            )
+        }
+        let accountIdentity: String
+        if let profile = state.1,
+           profile.isLoggedIn,
+           profile.canUseChatGPTPlan {
+            accountIdentity = ChatGPTSubscriptionTranslationProvider.accountID(from: profile.accessToken)
+                ?? profile.email
+        } else {
+            accountIdentity = ""
+        }
+        return OpenAITranslationExecutionConfiguration(
+            channel: .chatGPTSubscription,
+            model: state.0,
+            credentialFingerprint: OpenAITranslationExecutionConfiguration.fingerprint(accountIdentity)
+        )
+    }
+
+    private func validatePlatformKey(
+        _ platformKey: String,
+        configuration: OpenAITranslationExecutionConfiguration
+    ) throws {
+        guard platformKey.hasPrefix("sk-") else {
+            throw NSError(domain: "AISubtitleError", code: -13,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "该任务使用 OpenAI Platform API，但 API Key 已被清除；请重新填写后重试"])
+        }
+        let currentFingerprint = OpenAITranslationExecutionConfiguration.fingerprint(platformKey)
+        guard let expectedFingerprint = configuration.credentialFingerprint,
+              expectedFingerprint == currentFingerprint else {
+            throw NSError(domain: "AISubtitleError", code: -15,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "OpenAI Platform API Key 已变更，请重试任务以使用新配置"])
+        }
+    }
+
+    private func chatGPTSubscriptionToken(
+        configuration: OpenAITranslationExecutionConfiguration,
+        forceRefresh: Bool
+    ) async throws -> String {
+        if let token = try await AuthManager.shared.accessTokenForRequests(forceRefresh: forceRefresh), !token.isEmpty {
+            let profileEmail = await MainActor.run { AuthManager.shared.currentProfile?.email ?? "" }
+            let accountIdentity = ChatGPTSubscriptionTranslationProvider.accountID(from: token) ?? profileEmail
+            let fingerprint = OpenAITranslationExecutionConfiguration.fingerprint(accountIdentity)
+            guard let expectedFingerprint = configuration.credentialFingerprint,
+                  expectedFingerprint == fingerprint else {
+                throw NSError(domain: "AISubtitleError", code: -16,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "ChatGPT 登录账户已变更，请重试任务以使用当前账户"])
+            }
+            return token
+        }
+        throw NSError(
+            domain: "AISubtitleError",
+            code: -13,
+            userInfo: [NSLocalizedDescriptionKey:
+                "请登录 ChatGPT 订阅账户，或填写 OpenAI Platform API Key"]
+        )
     }
 
     private func saveSRTBestEffort(lines: [SubtitleLine], videoURL: URL, suffix: String?) {

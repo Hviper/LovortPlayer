@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -92,6 +93,12 @@ public struct TranslationCredentialStore: Sendable {
 
 public struct OpenAITranslationProvider: SubtitleTranslationProviding {
     let token: String
+    let model: String?
+
+    public init(token: String, model: String? = nil) {
+        self.token = token
+        self.model = model
+    }
 
     public func translate(
         lines: [SubtitleLine],
@@ -99,12 +106,216 @@ public struct OpenAITranslationProvider: SubtitleTranslationProviding {
         targetLanguage: String,
         onProgress: (@Sendable (String) -> Void)?
     ) async throws -> [SubtitleLine] {
-        try await CloudAISubtitleService(apiKey: token).translate(
+        try await CloudAISubtitleService(apiKey: token, textModel: model).translate(
             lines: lines,
             targetLanguage: targetLanguage,
             onProgress: onProgress
         )
     }
+}
+
+public enum OpenAITextChannel: String, Codable, Sendable {
+    case platformAPI
+    case chatGPTSubscription
+}
+
+public struct OpenAITranslationExecutionConfiguration: Codable, Equatable, Sendable {
+    public let channel: OpenAITextChannel
+    public let model: String
+    public let credentialFingerprint: String?
+
+    public init(channel: OpenAITextChannel, model: String, credentialFingerprint: String?) {
+        self.channel = channel
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.credentialFingerprint = credentialFingerprint
+    }
+
+    public var cacheIdentity: String {
+        "openAI|\(channel.rawValue)|\(model)|\(credentialFingerprint ?? "unconfigured")"
+    }
+
+    public static func fingerprint(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        return SHA256.hash(data: Data(value.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct ChatGPTSubscriptionTranslationProvider: SubtitleTranslationProviding {
+    public typealias TokenProvider = @Sendable (_ forceRefresh: Bool) async throws -> String
+
+    private let tokenProvider: TokenProvider
+    let model: String
+    private let session: URLSession
+
+    public init(tokenProvider: @escaping TokenProvider, model: String, session: URLSession? = nil) {
+        self.tokenProvider = tokenProvider
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = 90
+            configuration.timeoutIntervalForResource = 600
+            let host = UserDefaults.standard.string(forKey: "LovortCustomProxyHost") ?? ""
+            let port = UserDefaults.standard.integer(forKey: "LovortCustomProxyPort")
+            if !host.isEmpty, port > 0 {
+                configuration.connectionProxyDictionary = [
+                    "HTTPEnable": 1, "HTTPProxy": host, "HTTPPort": port,
+                    "HTTPSEnable": 1, "HTTPSProxy": host, "HTTPSPort": port
+                ]
+            }
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    public func translate(
+        lines: [SubtitleLine],
+        sourceLanguage: SubtitleSourceLanguage,
+        targetLanguage: String,
+        onProgress: (@Sendable (String) -> Void)?
+    ) async throws -> [SubtitleLine] {
+        try await transform(
+            lines: lines,
+            text: { $0.originalText },
+            targetLanguage: targetLanguage,
+            progressLabel: "ChatGPT 订阅正在翻译",
+            instructions: "You are a professional audiovisual subtitle translator. Preserve character voice, relationships, honorifics, slang, and context.",
+            onProgress: onProgress
+        )
+    }
+
+    public func polish(
+        lines: [SubtitleLine],
+        targetLanguage: String,
+        onProgress: (@Sendable (String) -> Void)?
+    ) async throws -> [SubtitleLine] {
+        try await transform(
+            lines: lines,
+            text: { $0.translatedText ?? $0.originalText },
+            targetLanguage: targetLanguage,
+            progressLabel: "ChatGPT 订阅正在精修",
+            instructions: "You are a professional subtitle editor. Polish the translated subtitles for consistent names, honorifics, slang, character voice, and natural audiovisual timing without changing meaning.",
+            onProgress: onProgress
+        )
+    }
+
+    private func transform(
+        lines: [SubtitleLine],
+        text: (SubtitleLine) -> String,
+        targetLanguage: String,
+        progressLabel: String,
+        instructions: String,
+        onProgress: (@Sendable (String) -> Void)?
+    ) async throws -> [SubtitleLine] {
+        guard !lines.isEmpty else { return [] }
+        var translated: [UUID: String] = [:]
+        let batches = stride(from: 0, to: lines.count, by: 24).map {
+            Array(lines[$0..<min($0 + 24, lines.count)])
+        }
+        for (batchIndex, batch) in batches.enumerated() {
+            try Task.checkCancellation()
+            onProgress?("\(progressLabel) \(batchIndex + 1)/\(batches.count)…")
+            let input = batch.enumerated().map {
+                ["index": $0.offset, "text": text($0.element)] as [String: Any]
+            }
+            let inputJSON = String(decoding: try JSONSerialization.data(withJSONObject: input), as: UTF8.self)
+            let prompt = """
+            将以下影视字幕处理为“\(targetLanguage)”。必须保留全部条目，不得合并、拆分或省略。
+            只返回严格 JSON 数组，不要 Markdown。每项格式为 {"index": 原索引, "translation": "结果"}，必须覆盖 0 到 \(batch.count - 1)。
+            输入：\(inputJSON)
+            """
+            let values = try await request(prompt: prompt, instructions: instructions,
+                                           expectedCount: batch.count)
+            for (line, value) in zip(batch, values) { translated[line.id] = value }
+        }
+        return lines.map { line in
+            SubtitleLine(id: line.id, startTime: line.startTime, endTime: line.endTime,
+                         originalText: line.originalText,
+                         translatedText: translated[line.id] ?? line.translatedText)
+        }
+    }
+
+    private func request(prompt: String, instructions: String, expectedCount: Int) async throws -> [String] {
+        guard let endpoint = URL(string: "https://chatgpt.com/backend-api/codex/responses") else {
+            throw URLError(.badURL)
+        }
+        guard !model.isEmpty else { throw subscriptionError("请先选择 ChatGPT 模型") }
+        var forceRefresh = false
+        for attempt in 0..<2 {
+            let token = try await tokenProvider(forceRefresh)
+            let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedToken.isEmpty else { throw subscriptionError("请先登录 ChatGPT 订阅账户") }
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(trimmedToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("responses=experimental", forHTTPHeaderField: "OpenAI-Beta")
+            if let accountID = Self.accountID(from: trimmedToken) {
+                request.setValue(accountID, forHTTPHeaderField: "chatgpt-account-id")
+            }
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model,
+                "instructions": instructions,
+                "input": [["role": "user", "content": [["type": "input_text", "text": prompt]]]],
+                "store": false
+            ])
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if status == 401, attempt == 0 {
+                forceRefresh = true
+                continue
+            }
+            guard (200...299).contains(status) else {
+                throw NSError(domain: "ChatGPTSubscription", code: status,
+                              userInfo: [NSLocalizedDescriptionKey: Self.statusMessage(status)])
+            }
+            let content = try Self.responseText(from: data)
+            return try CloudAISubtitleService.decodeTranslations(from: content, expectedCount: expectedCount)
+        }
+        throw subscriptionError("ChatGPT 登录已失效，请重新登录")
+    }
+
+    static func accountID(from token: String) -> String? {
+        let parts = token.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var value = String(parts[1]).replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while value.count % 4 != 0 { value += "=" }
+        guard let data = Data(base64Encoded: value),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let auth = claims["https://api.openai.com/auth"] as? [String: Any] else { return nil }
+        return auth["chatgpt_account_id"] as? String
+    }
+
+    private static func responseText(from data: Data) throws -> String {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw subscriptionError("ChatGPT 返回格式无效")
+        }
+        if let text = root["output_text"] as? String, !text.isEmpty { return text }
+        for item in root["output"] as? [[String: Any]] ?? [] {
+            for content in item["content"] as? [[String: Any]] ?? [] {
+                if let text = content["text"] as? String, !text.isEmpty { return text }
+            }
+        }
+        throw subscriptionError("ChatGPT 未返回有效字幕文本")
+    }
+
+    private static func statusMessage(_ status: Int) -> String {
+        switch status {
+        case 401: return "ChatGPT 登录已失效，请重新登录"
+        case 403: return "当前 ChatGPT 账户未授权订阅模型能力"
+        case 429: return "ChatGPT 订阅额度暂时受限，请稍后重试"
+        default: return "ChatGPT 订阅请求失败（HTTP \(status)）"
+        }
+    }
+
+    private static func subscriptionError(_ message: String) -> NSError {
+        NSError(domain: "ChatGPTSubscription", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func subscriptionError(_ message: String) -> NSError { Self.subscriptionError(message) }
 }
 
 public struct RESTTranslationProvider: SubtitleTranslationProviding {
@@ -348,7 +559,18 @@ public struct TranslationAPISettings: Sendable, Equatable {
     }
 
     public static func effectiveProvider(_ provider: SubtitleTranslationProviderType, hasCredential: Bool) -> SubtitleTranslationProviderType {
-        provider != .apple && !hasCredential ? .apple : provider
+        provider != .apple && provider != .openAI && !hasCredential ? .apple : provider
+    }
+
+    public func effectiveCacheIdentity(
+        openAIConfiguration: OpenAITranslationExecutionConfiguration?,
+        enhanceWithGPT: Bool
+    ) -> String? {
+        if provider == .openAI {
+            return openAIConfiguration?.cacheIdentity ?? "openAI|unconfigured"
+        }
+        guard enhanceWithGPT else { return cacheIdentity }
+        return "\(cacheIdentity ?? provider.rawValue)|gpt-polish|\(openAIConfiguration?.cacheIdentity ?? "openAI|unconfigured")"
     }
 }
 

@@ -4,13 +4,20 @@ import Foundation
 public final class CloudAISubtitleService: @unchecked Sendable {
     private let apiKey: String
     private let baseURL: URL
+    private let textModel: String?
     private let sessionOverride: URLSession?
     private let maximumUploadBytes = 24 * 1_024 * 1_024
     private let cloudSliceDuration: TimeInterval = 4 * 60
 
-    public init(apiKey: String, baseURL: URL = URL(string: "https://api.openai.com/v1")!, session: URLSession? = nil) {
+    public init(
+        apiKey: String,
+        baseURL: URL = URL(string: "https://api.openai.com/v1")!,
+        textModel: String? = nil,
+        session: URLSession? = nil
+    ) {
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baseURL = baseURL
+        self.textModel = textModel?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.sessionOverride = session
     }
 
@@ -163,8 +170,15 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         输入：\(sourceJSON)
         """
 
-        let activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
-        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
+        let activeModel: String
+        if let textModel, !textModel.isEmpty {
+            activeModel = textModel
+        } else {
+            activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
+        }
+        let candidateModels = textModel == nil
+            ? uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
+            : [activeModel]
         var lastError: Error?
         for model in candidateModels {
             do {
@@ -195,8 +209,15 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         只返回严格 JSON 数组，每项格式为 {"index": 原索引, "translation": "精修译文"}，必须覆盖 0 到 \(lines.count - 1)。
         输入：\(sourceJSON)
         """
-        let activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
-        let candidateModels = uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
+        let activeModel: String
+        if let textModel, !textModel.isEmpty {
+            activeModel = textModel
+        } else {
+            activeModel = await MainActor.run { AIModelManager.shared.selectedModelID }
+        }
+        let candidateModels = textModel == nil
+            ? uniqueModels([activeModel, "gpt-6.1-sol", "gpt-6-luna"])
+            : [activeModel]
         var lastError: Error?
         for model in candidateModels {
             do {

@@ -17,9 +17,80 @@ final class TranslationAPITests: XCTestCase {
 
     func testUnconfiguredProviderUsesSystemTranslation() {
         for provider in SubtitleTranslationProviderType.allCases {
-            XCTAssertEqual(TranslationAPISettings.effectiveProvider(provider, hasCredential: false), .apple)
+            let expected: SubtitleTranslationProviderType = provider == .openAI ? .openAI : .apple
+            XCTAssertEqual(TranslationAPISettings.effectiveProvider(provider, hasCredential: false), expected)
             XCTAssertEqual(TranslationAPISettings.effectiveProvider(provider, hasCredential: true), provider)
         }
+    }
+
+    func testChatGPTSubscriptionTranslationUsesOnlyCodexTextEndpoint() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatGPTSubscriptionURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let lines = [
+            SubtitleLine(startTime: 1, endTime: 2, originalText: "Hello"),
+            SubtitleLine(startTime: 3, endTime: 4, originalText: "Bye")
+        ]
+
+        let result = try await ChatGPTSubscriptionTranslationProvider(
+            tokenProvider: { _ in ChatGPTSubscriptionURLProtocol.token },
+            model: "gpt-6.1-sol",
+            session: session
+        ).translate(lines: lines, sourceLanguage: .english,
+                    targetLanguage: "中文 (简体)", onProgress: nil)
+
+        XCTAssertEqual(result.map(\.id), lines.map(\.id))
+        XCTAssertEqual(result.map(\.originalText), ["Hello", "Bye"])
+        XCTAssertEqual(result.map(\.translatedText), ["你好", "再见"])
+    }
+
+    func testChatGPTSubscriptionRefreshesOnceAfterUnauthorizedResponse() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatGPTRefreshURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let recorder = TokenRequestRecorder()
+
+        let result = try await ChatGPTSubscriptionTranslationProvider(
+            tokenProvider: { forceRefresh in
+                await recorder.append(forceRefresh)
+                return forceRefresh ? ChatGPTRefreshURLProtocol.refreshedToken : "expired-token"
+            },
+            model: "gpt-6.1-sol",
+            session: session
+        ).translate(
+            lines: [SubtitleLine(startTime: 0, endTime: 1, originalText: "Hello")],
+            sourceLanguage: .english,
+            targetLanguage: "中文 (简体)",
+            onProgress: nil
+        )
+
+        let refreshRequests = await recorder.values()
+        XCTAssertEqual(refreshRequests, [false, true])
+        XCTAssertEqual(result.first?.translatedText, "你好")
+    }
+
+    func testOpenAIExecutionIdentitySeparatesChannelModelAndCredential() {
+        let platform = OpenAITranslationExecutionConfiguration(
+            channel: .platformAPI, model: "model-a",
+            credentialFingerprint: OpenAITranslationExecutionConfiguration.fingerprint("sk-one")
+        )
+        let subscription = OpenAITranslationExecutionConfiguration(
+            channel: .chatGPTSubscription, model: "model-a",
+            credentialFingerprint: OpenAITranslationExecutionConfiguration.fingerprint("account-one")
+        )
+        let anotherModel = OpenAITranslationExecutionConfiguration(
+            channel: .platformAPI, model: "model-b",
+            credentialFingerprint: OpenAITranslationExecutionConfiguration.fingerprint("sk-one")
+        )
+        XCTAssertNotEqual(platform.cacheIdentity, subscription.cacheIdentity)
+        XCTAssertNotEqual(platform.cacheIdentity, anotherModel.cacheIdentity)
+        XCTAssertFalse(platform.cacheIdentity.contains("sk-one"))
+
+        let settings = TranslationAPISettings(provider: .openAI)
+        XCTAssertEqual(settings.effectiveCacheIdentity(openAIConfiguration: platform, enhanceWithGPT: false),
+                       platform.cacheIdentity)
     }
 
     func testCacheIdentityChangesWithEndpointOrModel() {
@@ -199,6 +270,63 @@ private final class TranslationTestURLProtocol: URLProtocol, @unchecked Sendable
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class ChatGPTSubscriptionURLProtocol: URLProtocol, @unchecked Sendable {
+    static let token = "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC10ZXN0In19.signature"
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard request.url?.absoluteString == "https://chatgpt.com/backend-api/codex/responses",
+              request.httpMethod == "POST",
+              request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)",
+              request.value(forHTTPHeaderField: "chatgpt-account-id") == "acct-test",
+              request.value(forHTTPHeaderField: "OpenAI-Beta") == "responses=experimental",
+              let body = request.httpBody,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              object["model"] as? String == "gpt-6.1-sol",
+              object["store"] as? Bool == false else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        let content = "[{\"index\":1,\"translation\":\"再见\"},{\"index\":0,\"translation\":\"你好\"}]"
+        let payload: [String: Any] = ["output": [["content": [["type": "output_text", "text": content]]]]]
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: payload))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private actor TokenRequestRecorder {
+    private var requests: [Bool] = []
+    func append(_ forceRefresh: Bool) { requests.append(forceRefresh) }
+    func values() -> [Bool] { requests }
+}
+
+private final class ChatGPTRefreshURLProtocol: URLProtocol, @unchecked Sendable {
+    static let refreshedToken = "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC10ZXN0In19.signature"
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let authorized = request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.refreshedToken)"
+        let status = authorized ? 200 : 401
+        let body: [String: Any]
+        if authorized {
+            let content = "[{\"index\":0,\"translation\":\"你好\"}]"
+            body = ["output": [["content": [["type": "output_text", "text": content]]]]]
+        } else {
+            body = ["error": ["message": "expired"]]
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: body))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
