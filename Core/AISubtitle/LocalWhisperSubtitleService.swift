@@ -118,6 +118,7 @@ public actor LocalWhisperSubtitleService {
     private var pipeline: WhisperKit?
     private var loadedModel: OfflineWhisperModel?
     public static let chunkDuration: TimeInterval = 4 * 60
+    private static let firstPassDuration: TimeInterval = 20
     public static let defaultUsesRelaxedVoiceDetection = false
     public static let previewUsesRelaxedVoiceDetection = true
 
@@ -242,6 +243,7 @@ public actor LocalWhisperSubtitleService {
         onEvent: (@Sendable (SubtitleProgressEvent) -> Void)? = nil,
         onPartialResult: (@Sendable (ProgressiveUpdate) async -> [SubtitleLine]?)? = nil
     ) async throws -> [SubtitleLine] {
+        let transcriptionStarted = Date()
         // Actor methods may interleave at every await. Keep WhisperKit's mutable
         // pipeline exclusive when a preview and a full task arrive together.
         while activeTranscriptionCount > 0 {
@@ -356,6 +358,7 @@ public actor LocalWhisperSubtitleService {
         var lines = existingLines
         var completed = completedChunkIndexes
         var resolvedLanguageCode = sourceLanguage.whisperCode
+        var recordedFirstCaption = !existingLines.isEmpty
 
         if let onPartialResult {
             let initialLines = await onPartialResult(ProgressiveUpdate(
@@ -378,7 +381,7 @@ public actor LocalWhisperSubtitleService {
                 mediaURL: audioURL,
                 sourceLanguage: sourceLanguage,
                 start: start,
-                duration: sliceDuration
+                duration: Self.firstSliceDuration(sliceDuration)
             )
         }
 
@@ -397,12 +400,13 @@ public actor LocalWhisperSubtitleService {
             try Task.checkCancellation()
             let start = TimeInterval(chunkIndex) * Self.chunkDuration
             let sliceDuration = min(Self.chunkDuration, duration - start)
+            let splitFirst = orderOffset == 0 && Self.firstSliceDuration(sliceDuration) < sliceDuration
 
             let currentTask = prefetchedTask ?? startSliceExportTask(
                 mediaURL: audioURL,
                 sourceLanguage: sourceLanguage,
                 start: start,
-                duration: sliceDuration
+                duration: splitFirst ? Self.firstPassDuration : sliceDuration
             )
             prefetchedTask = nil
 
@@ -412,6 +416,43 @@ public actor LocalWhisperSubtitleService {
             await SubtitlePerformanceLog.shared.record(stage: "切片等待（含预取）", model: model.rawValue, seconds: Date().timeIntervalSince(extractionStarted))
             defer {
                 try? FileManager.default.removeItem(at: sliceURL)
+            }
+            try Task.checkCancellation()
+
+            onProgress?("正在离线生成第 \(completed.count + 1)/\(totalChunks) 个字幕分片...")
+            onEvent?(.transcription(completed: completed.count, total: totalChunks))
+            var prefixLines: [SubtitleLine] = []
+            if splitFirst {
+                let prefix = try await transcribeSingleAudio(pipeline: pipeline, audioURL: sliceURL, languageCode: resolvedLanguageCode,
+                    offset: start, chunkNumber: completed.count + 1, totalChunks: totalChunks,
+                    useRelaxedVoiceDetection: useRelaxedVoiceDetection, onProgress: onProgress,
+                    clipRange: 0...Float(Self.firstPassDuration))
+                prefixLines = prefix.lines
+                if resolvedLanguageCode == nil, !prefix.lines.isEmpty { resolvedLanguageCode = prefix.detectedLanguage }
+                lines.removeAll { $0.startTime >= start && $0.startTime < start + sliceDuration }
+                lines.append(contentsOf: prefixLines)
+                lines.sort { $0.startTime < $1.startTime }
+                if let onPartialResult, let merged = await onPartialResult(ProgressiveUpdate(lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: totalChunks, latestChunkIndex: chunkIndex, latestChunkLines: prefixLines)) {
+                    lines = merged
+                    prefixLines = merged.filter { $0.startTime >= start && $0.startTime < start + Self.firstPassDuration }
+                }
+                if !recordedFirstCaption, !prefixLines.isEmpty {
+                    recordedFirstCaption = true
+                    await SubtitlePerformanceLog.shared.record(stage: "首条原文产出", model: model.rawValue,
+                        seconds: Date().timeIntervalSince(transcriptionStarted))
+                }
+            }
+            var remainingURL: URL?
+            defer { if let remainingURL { try? FileManager.default.removeItem(at: remainingURL) } }
+            if splitFirst {
+                let output = FileManager.default.temporaryDirectory.appendingPathComponent("lovort-remainder-\(UUID().uuidString).m4a")
+                remainingURL = output
+                let remainingStarted = Date()
+                try await exportAudioSlice(mediaURL: audioURL, sourceLanguage: sourceLanguage,
+                    start: start + Self.firstPassDuration, duration: sliceDuration - Self.firstPassDuration, outputURL: output)
+                try Task.checkCancellation()
+                await SubtitlePerformanceLog.shared.record(stage: "首片剩余音频提取", model: model.rawValue,
+                    seconds: Date().timeIntervalSince(remainingStarted))
             }
 
             let nextOffset = orderOffset + 1
@@ -426,38 +467,11 @@ public actor LocalWhisperSubtitleService {
                     duration: nextSliceDuration
                 )
             }
-
-            onProgress?("正在离线生成第 \(completed.count + 1)/\(totalChunks) 个字幕分片...")
-            onEvent?(.transcription(completed: completed.count, total: totalChunks))
-            var prefixLines: [SubtitleLine] = []
-            let prefixLength: Float = 20
-            let splitFirst = orderOffset == 0 && sliceDuration > Double(prefixLength) + 5
-            if splitFirst {
-                let prefix = try await transcribeSingleAudio(pipeline: pipeline, audioURL: sliceURL, languageCode: resolvedLanguageCode,
-                    offset: start, chunkNumber: completed.count + 1, totalChunks: totalChunks,
-                    useRelaxedVoiceDetection: useRelaxedVoiceDetection, onProgress: onProgress, clipRange: 0...prefixLength)
-                prefixLines = prefix.lines
-                if resolvedLanguageCode == nil, !prefix.lines.isEmpty { resolvedLanguageCode = prefix.detectedLanguage }
-                lines.removeAll { $0.startTime >= start && $0.startTime < start + sliceDuration }
-                lines.append(contentsOf: prefixLines)
-                lines.sort { $0.startTime < $1.startTime }
-                if let onPartialResult, let merged = await onPartialResult(ProgressiveUpdate(lines: lines, completedChunkIndexes: completed.sorted(), totalChunkCount: totalChunks, latestChunkIndex: chunkIndex, latestChunkLines: prefixLines)) {
-                    lines = merged
-                    prefixLines = merged.filter { $0.startTime >= start && $0.startTime < start + Double(prefixLength) }
-                }
-            }
-            var remainingURL: URL?
-            defer { if let remainingURL { try? FileManager.default.removeItem(at: remainingURL) } }
-            if splitFirst {
-                let output = FileManager.default.temporaryDirectory.appendingPathComponent("lovort-remainder-\(UUID().uuidString).m4a")
-                remainingURL = output
-                try await exportAudioSlice(mediaURL: audioURL, sourceLanguage: sourceLanguage, start: start + Double(prefixLength), duration: sliceDuration - Double(prefixLength), outputURL: output)
-            }
             let chunkResult = try await transcribeSingleAudio(
                 pipeline: pipeline,
                 audioURL: remainingURL ?? sliceURL,
                 languageCode: resolvedLanguageCode,
-                offset: start + (splitFirst ? Double(prefixLength) : 0),
+                offset: start + (splitFirst ? Self.firstPassDuration : 0),
                 chunkNumber: completed.count + 1,
                 totalChunks: totalChunks,
                 useRelaxedVoiceDetection: useRelaxedVoiceDetection,
@@ -470,6 +484,11 @@ public actor LocalWhisperSubtitleService {
             }
 
             let chunkLines = prefixLines + chunkResult.lines
+            if !recordedFirstCaption, !chunkLines.isEmpty {
+                recordedFirstCaption = true
+                await SubtitlePerformanceLog.shared.record(stage: "首条原文产出", model: model.rawValue,
+                    seconds: Date().timeIntervalSince(transcriptionStarted))
+            }
             let rangeEnd = start + sliceDuration
             lines.removeAll { $0.startTime >= start && $0.startTime < rangeEnd }
             lines.append(contentsOf: chunkLines)
@@ -492,7 +511,13 @@ public actor LocalWhisperSubtitleService {
         }
 
         guard !lines.isEmpty else { throw serviceError("离线模型未检测到清晰人声，请检查音轨语言或改用高精度模型") }
+        await SubtitlePerformanceLog.shared.record(stage: "本次原文转写", model: model.rawValue,
+            seconds: Date().timeIntervalSince(transcriptionStarted))
         return lines
+    }
+
+    static func firstSliceDuration(_ duration: TimeInterval) -> TimeInterval {
+        duration > firstPassDuration + 5 ? firstPassDuration : duration
     }
 
     private func transcribeSingleAudio(

@@ -2,6 +2,13 @@ import XCTest
 @testable import LovortPlayerCore
 
 final class SubtitlePipelineTests: XCTestCase {
+    func testFirstOfflineSliceOnlyExportsPreviewAudio() {
+        XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(240), 20)
+        XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(26), 20)
+        XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(25), 25)
+        XCTAssertEqual(LocalWhisperSubtitleService.firstSliceDuration(12), 12)
+    }
+
     func testSubtitleTaskPhaseActivityClassification() {
         XCTAssertTrue(SubtitleTaskPhase.queued.isActive)
         XCTAssertTrue(SubtitleTaskPhase.transcribing.isActive)
