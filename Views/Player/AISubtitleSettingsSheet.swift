@@ -619,6 +619,9 @@ public struct AISubtitleSettingsSheet: View {
     private var subtitleDisplaySettings: some View {
         VStack(alignment: .leading, spacing: 10) {
             Picker("显示内容", selection: $display.textMode) { ForEach(SubtitleExportTextMode.allCases) { Text($0.title).tag($0) } }
+            Picker("字幕颜色", selection: $display.textColor) {
+                ForEach(SubtitleTextColor.allCases) { color in Text(color.title).tag(color) }
+            }
             Text("字幕字号：\(Int(display.scale * 100))%")
             Slider(value: $display.scale, in: 0.7...1.6, step: 0.05)
             Text("字幕上下位置")

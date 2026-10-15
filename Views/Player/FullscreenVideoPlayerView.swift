@@ -4,6 +4,7 @@ import LovortPlayerCore
 import SwiftUI
 import Translation
 import KSPlayer
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 #endif
@@ -11,6 +12,9 @@ import UIKit
 public struct FullscreenVideoPlayerView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject public var viewModel = PlayerViewModel()
+    #if os(iOS)
+    @StateObject private var pictureInPicture = PictureInPictureState()
+    #endif
     @ObservedObject private var appleTranslation = AppleTranslationBridge.shared
     @ObservedObject private var vault = VaultManager.shared
     @ObservedObject private var settings = AppSettings.shared
@@ -18,6 +22,7 @@ public struct FullscreenVideoPlayerView: View {
     public let videoTitle: String
     public let isPrivate: Bool
     public var onDismiss: () -> Void
+    public var onFinished: () -> Void
 
     // 局部手势与状态
     @State private var gestureIndicatorText: String?
@@ -31,13 +36,16 @@ public struct FullscreenVideoPlayerView: View {
     @State private var panAxis: Int?
     @State private var showSubtitleTimeline = false
     @State private var showSubtitleExport = false
+    @State private var showSubtitleImporter = false
     @State private var bottomControlsHeight: CGFloat = 0
 
-    public init(videoURL: URL, videoTitle: String, isPrivate: Bool = false, onDismiss: @escaping () -> Void) {
+    public init(videoURL: URL, videoTitle: String, isPrivate: Bool = false,
+                onDismiss: @escaping () -> Void, onFinished: @escaping () -> Void = {}) {
         self.videoURL = videoURL
         self.videoTitle = videoTitle
         self.isPrivate = isPrivate
         self.onDismiss = onDismiss
+        self.onFinished = onFinished
     }
 
     public var body: some View {
@@ -53,8 +61,13 @@ public struct FullscreenVideoPlayerView: View {
                     KSVideoPlayer(coordinator: coordinator, url: viewModel.playbackMediaURL ?? videoURL, options: options)
                         .ignoresSafeArea()
                 } else {
+                    #if os(iOS)
+                    NativeVideoPlayerView(player: viewModel.player, pictureInPicture: isPrivate ? nil : pictureInPicture)
+                        .ignoresSafeArea()
+                    #else
                     NativeVideoPlayerView(player: viewModel.player)
                         .ignoresSafeArea()
+                    #endif
                 }
 
                 if viewModel.isAV1SoftwareMode {
@@ -195,6 +208,7 @@ public struct FullscreenVideoPlayerView: View {
             await appleTranslation.perform(using: session)
         }
         .onAppear {
+            viewModel.onPlaybackFinished = onFinished
             viewModel.loadVideo(url: videoURL, isPrivate: isPrivate)
             viewModel.togglePlayPause()
             #if os(iOS)
@@ -229,6 +243,21 @@ public struct FullscreenVideoPlayerView: View {
         }
         .sheet(isPresented: $showSubtitleTimeline) {
             SubtitleTimelineSheet(viewModel: viewModel)
+        }
+        .fileImporter(isPresented: $showSubtitleImporter, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let url):
+                Task {
+                    do {
+                        try await viewModel.importExternalSubtitles(from: url)
+                        showGestureHUD(icon: "captions.bubble.fill", text: "外部字幕已加载", autoDismiss: true)
+                    } catch {
+                        showGestureHUD(icon: "exclamationmark.triangle.fill", text: error.localizedDescription, autoDismiss: true)
+                    }
+                }
+            case .failure(let error):
+                showGestureHUD(icon: "exclamationmark.triangle.fill", text: error.localizedDescription, autoDismiss: true)
+            }
         }
     }
 
@@ -281,6 +310,23 @@ public struct FullscreenVideoPlayerView: View {
 
             Spacer()
 
+            #if os(iOS)
+            if !isPrivate && !viewModel.isCompatibilityMode && !viewModel.isAV1SoftwareMode {
+                AirPlayRoutePicker()
+                    .frame(width: 38, height: 38)
+                    .accessibilityLabel("选择 AirPlay 播放设备")
+                if pictureInPicture.isAvailable {
+                    Button { pictureInPicture.toggle() } label: {
+                        Image(systemName: pictureInPicture.isActive ? "pip.exit" : "pip.enter")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                    }
+                    .accessibilityLabel("画中画")
+                }
+            }
+            #endif
+
             if !viewModel.subtitles.isEmpty {
                 Button(action: { showSubtitleTimeline = true }) {
                     Image(systemName: "list.bullet.rectangle")
@@ -327,6 +373,14 @@ public struct FullscreenVideoPlayerView: View {
 
             // 分享与导出菜单
             Menu {
+                Button { showSubtitleImporter = true } label: {
+                    Label("导入 SRT / ASS 字幕", systemImage: "text.badge.plus")
+                }
+                if viewModel.usesExternalSubtitles {
+                    Button { viewModel.useGeneratedSubtitles() } label: {
+                        Label("切回已生成字幕", systemImage: "captions.bubble")
+                    }
+                }
                 Button { showSubtitleExport = true } label: {
                     Label("导出带字幕视频", systemImage: "captions.bubble")
                 }

@@ -2,6 +2,10 @@
 import LovortPlayerCore
 #endif
 import SwiftUI
+#if os(iOS)
+import CoreImage.CIFilterBuiltins
+import UIKit
+#endif
 
 public struct LANUploadSheet: View {
     @ObservedObject private var server = LANServerManager.shared
@@ -10,6 +14,8 @@ public struct LANUploadSheet: View {
     @State private var receivedFilesCount: Int = 0
     @State private var latestFileName: String? = nil
     @Environment(\.dismiss) private var dismiss
+
+    private var uploadURL: String { "http://\(ipAddress):\(serverPort)/?token=\(server.accessToken)" }
 
     public init() {}
 
@@ -47,7 +53,7 @@ public struct LANUploadSheet: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.white.opacity(0.4))
 
-                        Text("http://\(ipAddress):\(serverPort)/?token=\(server.accessToken)")
+                        Text(uploadURL)
                             .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundColor(.cyan)
                             .textSelection(.enabled)
@@ -56,6 +62,21 @@ public struct LANUploadSheet: View {
                         Text("已支持电脑拖拽，传输完毕后手机将自动落盘入库")
                             .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.4))
+
+                        #if os(iOS)
+                        if server.isRunning, let qr = makeQRCode(uploadURL) {
+                            Image(uiImage: qr)
+                                .interpolation(.none)
+                                .resizable()
+                                .frame(width: 168, height: 168)
+                                .padding(10)
+                                .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                                .accessibilityLabel("传输地址二维码")
+                        }
+                        Button("复制地址") { UIPasteboard.general.string = uploadURL }
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.cyan)
+                        #endif
                     }
                     .padding(.vertical, 18)
                     .frame(maxWidth: .infinity)
@@ -174,4 +195,16 @@ public struct LANUploadSheet: View {
             try? LANServerManager.shared.startServer(port: 8080)
         }
     }
+
+    #if os(iOS)
+    private func makeQRCode(_ value: String) -> UIImage? {
+        guard let data = value.data(using: .utf8) else { return nil }
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = data
+        filter.correctionLevel = "M"
+        guard let image = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
+              let cgImage = CIContext().createCGImage(image, from: image.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+    #endif
 }

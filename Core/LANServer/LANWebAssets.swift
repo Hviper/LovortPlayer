@@ -105,7 +105,7 @@ public struct LANWebAssets {
     <body>
         <div class="card">
             <h1>Lovort 局域网直传</h1>
-            <p>将电脑中的视频拖拽至下方，直接导入至 iPhone 播放器</p>
+            <p>将电脑中的视频拖拽至下方；连接中断后重新选择同一文件即可续传</p>
             <div class="dropzone" id="dropzone">
                 <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
                 <div>拖拽视频文件到此处，或点击浏览</div>
@@ -137,47 +137,90 @@ public struct LANWebAssets {
                 if (fileInput.files.length) uploadFiles(fileInput.files);
             });
 
-            function uploadFiles(files) {
+            async function uploadFiles(files) {
                 progressContainer.style.display = 'block';
-                Array.from(files).forEach(file => {
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('POST', '/upload', true);
-                    xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
-                    xhr.setRequestHeader('X-Upload-Token', '{{UPLOAD_TOKEN}}');
-                    xhr.upload.onprogress = (e) => {
-                        if (e.lengthComputable) {
-                            const percent = Math.round((e.loaded / e.total) * 100);
-                            progressFill.style.width = percent + '%';
-                            if (percent >= 100) {
-                                progressText.innerText = '传输完毕，手机端正在保存入库...';
-                            } else {
-                                progressText.innerText = '正在上传 ' + file.name + ' (' + percent + '%)';
-                            }
-                        }
-                    };
-                    xhr.onload = () => {
-                        if (xhr.status === 200) {
-                            progressText.innerText = '✅ 传输成功！手机端已自动存入媒体库';
-                            progressFill.style.width = '100%';
-                            const item = document.createElement('div');
-                            item.className = 'file-item';
-                            const name = document.createElement('span');
-                            name.textContent = file.name;
-                            const status = document.createElement('span');
-                            status.className = 'file-success';
-                            status.textContent = '已保存到 iPhone';
-                            item.appendChild(name);
-                            item.appendChild(status);
-                            fileList.appendChild(item);
-                        } else {
-                            progressText.innerText = '❌ 上传失败，请检查网络连接';
-                        }
-                    };
-                    xhr.onerror = () => {
-                        progressText.innerText = '❌ 网络异常中断';
-                    };
-                    xhr.send(file);
+                for (const file of Array.from(files)) {
+                    try { await uploadOne(file); }
+                    catch (error) { progressText.textContent = '❌ ' + file.name + '：' + error.message + '。重新选择同一文件可续传。'; }
+                }
+            }
+
+            function uploadID() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                    const n = Math.floor(Math.random() * 16);
+                    return (c === 'x' ? n : (n & 3 | 8)).toString(16);
                 });
+            }
+
+            async function uploadOne(file) {
+                const key = 'lovort-upload:' + file.name + ':' + file.size + ':' + file.lastModified;
+                let id;
+                try { id = localStorage.getItem(key) || uploadID(); localStorage.setItem(key, id); }
+                catch (_) { id = uploadID(); }
+                const headers = {
+                    'X-Upload-Token': '{{UPLOAD_TOKEN}}',
+                    'X-Upload-ID': id,
+                    'X-File-Name': encodeURIComponent(file.name),
+                    'X-File-Size': String(file.size)
+                };
+                async function getStatus() {
+                    const response = await fetch('/upload/status', { method: 'POST', headers });
+                    if (!response.ok) throw new Error(await response.text());
+                    return response.json();
+                }
+                let state;
+                try { state = await getStatus(); }
+                catch (_) {
+                    id = uploadID();
+                    headers['X-Upload-ID'] = id;
+                    try { localStorage.setItem(key, id); } catch (_) {}
+                    state = await getStatus();
+                }
+                let failures = 0;
+                while (!state.complete && state.offset < file.size) {
+                    const offset = state.offset;
+                    const chunk = file.slice(offset, Math.min(file.size, offset + 4 * 1024 * 1024));
+                    const startedAt = performance.now();
+                    try {
+                        state = await new Promise((resolve, reject) => {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('POST', '/upload/chunk', true);
+                            xhr.setRequestHeader('X-Upload-Token', '{{UPLOAD_TOKEN}}');
+                            xhr.setRequestHeader('X-Upload-ID', id);
+                            xhr.setRequestHeader('X-Upload-Offset', String(offset));
+                            xhr.upload.onprogress = event => {
+                                const sent = offset + event.loaded;
+                                const percent = Math.floor(sent * 100 / file.size);
+                                const elapsed = Math.max((performance.now() - startedAt) / 1000, 0.01);
+                                const mbps = (event.loaded / elapsed / 1048576).toFixed(1);
+                                progressFill.style.width = percent + '%';
+                                progressText.textContent = '正在上传 ' + file.name + ' · ' + percent + '% · ' + mbps + ' MB/s';
+                            };
+                            xhr.onload = () => xhr.status === 200 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(xhr.responseText || '分片上传失败'));
+                            xhr.onerror = () => reject(new Error('连接中断'));
+                            xhr.send(chunk);
+                        });
+                        failures = 0;
+                    } catch (error) {
+                        failures++;
+                        if (failures >= 3) throw error;
+                        await new Promise(resolve => setTimeout(resolve, 600));
+                        state = await getStatus();
+                    }
+                }
+                try { localStorage.removeItem(key); } catch (_) {}
+                progressFill.style.width = '100%';
+                progressText.textContent = '✅ 传输成功！手机端已自动存入媒体库';
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                const name = document.createElement('span');
+                name.textContent = state.savedName || file.name;
+                const status = document.createElement('span');
+                status.className = 'file-success';
+                status.textContent = '已保存到 iPhone';
+                item.appendChild(name);
+                item.appendChild(status);
+                fileList.appendChild(item);
             }
         </script>
     </body>

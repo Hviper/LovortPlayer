@@ -89,6 +89,18 @@ jobs:
           mkdir -p Payload
           cp -r build/DerivedData/Build/Products/Release-iphoneos/LovortPlayer.app Payload/
           zip -r LovortPlayer.ipa Payload
+          python3 - <<'PY'
+          import json, os, datetime, plistlib
+          with open('Payload/LovortPlayer.app/Info.plist', 'rb') as app_plist:
+              info = plistlib.load(app_plist)
+          with open('build-info.json', 'w', encoding='utf-8') as file:
+              json.dump({
+                  'version': info['CFBundleShortVersionString'],
+                  'buildNumber': int(info['CFBundleVersion']),
+                  'commit': os.environ['GITHUB_SHA'],
+                  'builtAt': datetime.datetime.now(datetime.timezone.utc).isoformat()
+              }, file, ensure_ascii=False)
+          PY
           # 打包 dSYM 供崩溃符号化
           zip -r LovortPlayer.dSYM.zip build/DerivedData/Build/Products/Release-iphoneos/LovortPlayer.app.dSYM 2>/dev/null || true
           echo "IPA size: $(du -sh LovortPlayer.ipa | cut -f1)"
@@ -99,6 +111,13 @@ jobs:
         with:
           name: LovortPlayer-IPA
           path: LovortPlayer.ipa
+          retention-days: 7
+
+      - name: Upload build information
+        uses: actions/upload-artifact@v4
+        with:
+          name: LovortPlayer-BuildInfo
+          path: build-info.json
           retention-days: 7
 
       - name: Upload dSYM Artifact
@@ -121,12 +140,19 @@ jobs:
         with:
           name: LovortPlayer-IPA
 
+      - name: Download build information
+        uses: actions/download-artifact@v4
+        with:
+          name: LovortPlayer-BuildInfo
+
       - name: Auto Publish to Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: "LovortPlayer Latest Build"
-          files: LovortPlayer.ipa
+          files: |
+            LovortPlayer.ipa
+            build-info.json
           draft: false
           prerelease: false
         env:

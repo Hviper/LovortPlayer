@@ -94,6 +94,10 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(useDefaultVolume, forKey: "settings.useDefaultVolume") }
     }
 
+    @Published public var autoPlayNext: Bool {
+        didSet { defaults.set(autoPlayNext, forKey: "settings.autoPlayNext") }
+    }
+
     // MARK: 私密文件夹
     /// 是否在 Tab 列表中显示私密文件夹 Tab
     @Published public var showVaultInTabBar: Bool {
@@ -122,6 +126,8 @@ public final class AppSettings: ObservableObject {
 
         let savedUseDefault = defaults.object(forKey: "settings.useDefaultVolume") as? Bool ?? false
         useDefaultVolume = savedUseDefault
+
+        autoPlayNext = defaults.object(forKey: "settings.autoPlayNext") as? Bool ?? true
 
         let savedShowVault = defaults.object(forKey: "settings.showVaultInTabBar") as? Bool ?? true
         showVaultInTabBar = savedShowVault
@@ -173,6 +179,7 @@ public final class AppSettings: ObservableObject {
         playbackOrientation = .auto
         defaultVolume = 0.8
         useDefaultVolume = false
+        autoPlayNext = true
         showVaultInTabBar = true
         vaultRequiresBiometrics = true
     }

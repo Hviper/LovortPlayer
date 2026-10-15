@@ -228,7 +228,7 @@ public final class MediaLibraryManager: ObservableObject {
         createdDestination = true
         if !video.isHidden {
             let base = source.deletingPathExtension()
-            let companions = ["srt", "source.srt", "bilingual.srt", "zh-Hans.srt", "zh.srt", "ja.srt", "en.srt", "lovort-subtitles.json"].map { base.appendingPathExtension($0) }.filter { fileManager.fileExists(atPath: $0.path) }
+            let companions = ["srt", "ass", "external.json", "external.srt", "external.ass", "source.srt", "bilingual.srt", "zh-Hans.srt", "zh.srt", "ja.srt", "en.srt", "lovort-subtitles.json"].map { base.appendingPathExtension($0) }.filter { fileManager.fileExists(atPath: $0.path) }
             if !companions.isEmpty { try fileManager.createDirectory(at: companionDirectory, withIntermediateDirectories: true) }
             let publicLegacyCaches = SubtitleCacheStore().cacheCandidates(for: source).filter {
                 $0.path.hasPrefix(documentsDirectory.path + "/") && fileManager.fileExists(atPath: $0.path) && !companions.contains($0)
@@ -281,6 +281,7 @@ public final class MediaLibraryManager: ObservableObject {
         do {
             try fileManager.removeItem(at: video.fileURL)
             SubtitleTaskManager.shared.purgeTasks(for: video.fileURL)
+            PlaylistStore.shared.removeVideo(video.id)
             MediaIdentityStore.shared.remove(video.fileURL)
             videos.removeAll { $0.id == video.id }
         } catch { showNotification(message: "删除失败：\(error.localizedDescription)", isError: true) }

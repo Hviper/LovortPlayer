@@ -9,19 +9,42 @@ private final class ClipSessionBox: @unchecked Sendable {
     init(_ session: AVAssetExportSession) { self.session = session }
 }
 
+public enum ClipExportStrategy: String, CaseIterable, Sendable, Hashable {
+    case fastCopy
+    case frameAccurate
+    public var title: String { self == .fastCopy ? "快速复制" : "精确裁切" }
+}
+
+public enum ClipExportMode: Sendable, Equatable {
+    case streamCopy
+    case reencoded
+}
+
+public struct ClipSegment: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public var start: TimeInterval
+    public var end: TimeInterval
+    public init(id: UUID = UUID(), start: TimeInterval, end: TimeInterval) {
+        self.id = id
+        self.start = start
+        self.end = end
+    }
+}
+
 public final class LosslessClipManager: @unchecked Sendable {
     public static let shared = LosslessClipManager()
 
     private init() {}
 
-    /// 无损精准截取视频（使用 Passthrough GOP 极速复制码流，不经过重编码）
+    /// Fast copy may align to keyframes; frame-accurate export re-encodes.
     public func exportLosslessClip(
         assetURL: URL,
         outputURL: URL,
         startTime: CMTime,
         endTime: CMTime,
-        saveToPhotos: Bool = true
-    ) async throws {
+        saveToPhotos: Bool = true,
+        strategy: ClipExportStrategy = .fastCopy
+    ) async throws -> ClipExportMode {
         let asset = AVURLAsset(url: assetURL)
         
         // 确保父目录存在
@@ -32,7 +55,8 @@ public final class LosslessClipManager: @unchecked Sendable {
 
         // 检查 Passthrough 兼容性，如不兼容则使用 HighestQuality 兼容性编码
         let presets = await AVAssetExportSession.exportPresets(compatibleWith: asset)
-        let preset = presets.contains(AVAssetExportPresetPassthrough) ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality
+        let copy = strategy == .fastCopy && presets.contains(AVAssetExportPresetPassthrough)
+        let preset = copy ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality
 
         guard let exportSession = AVAssetExportSession(
             asset: asset,
@@ -62,5 +86,6 @@ public final class LosslessClipManager: @unchecked Sendable {
         // 尝试自动保存一份到系统相册
         if saveToPhotos { try? await VideoExportManager.shared.saveToPhotoLibrary(videoURL: outputURL) }
         #endif
+        return copy ? .streamCopy : .reencoded
     }
 }

@@ -12,6 +12,7 @@ import PhotosUI
 public struct MediaLibraryHomeView: View {
     @StateObject private var libraryManager = MediaLibraryManager.shared
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var playlists = PlaylistStore.shared
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var vault = VaultManager.shared
     @State private var showVaultSetup = false
@@ -22,6 +23,9 @@ public struct MediaLibraryHomeView: View {
     @State private var searchText = ""
     @AppStorage("library.sort") private var sortOrder = "newest"
     @State private var selectedVideo: VideoItem?
+    @State private var selectedPlaylistID: UUID?
+    @State private var showCreatePlaylist = false
+    @State private var newPlaylistName = ""
     @State private var showLANUpload: Bool = false
     @State private var showVaultUnlocked: Bool = false
     @State private var isAuthenticatingVault: Bool = false
@@ -51,14 +55,18 @@ public struct MediaLibraryHomeView: View {
             default: return !video.isHidden
             }
         }
+        if filterTab == 3 {
+            guard let selectedPlaylistID else { return [] }
+            items = playlists.orderedVideos(items, in: selectedPlaylistID)
+        }
         if !searchText.isEmpty { items = items.filter { $0.title.localizedCaseInsensitiveContains(searchText) } }
-        items.sort { lhs, rhs in
+        if filterTab != 3 { items.sort { lhs, rhs in
             switch sortOrder {
             case "name": return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
             case "recent": return PlaybackHistoryManager.shared.lastPlayedDate(for: lhs.fileURL) > PlaybackHistoryManager.shared.lastPlayedDate(for: rhs.fileURL)
             default: return lhs.createdAt > rhs.createdAt
             }
-        }
+        } }
         return items
     }
 
@@ -115,6 +123,7 @@ public struct MediaLibraryHomeView: View {
 
                     // 分类 Tabs
                     tabsBar
+                    if filterTab == 3 { playlistBar }
 
                     // 视频卡片流
                     if libraryManager.isLoading && libraryManager.videos.isEmpty {
@@ -244,8 +253,15 @@ public struct MediaLibraryHomeView: View {
                     isPrivate: video.isHidden,
                     onDismiss: {
                         selectedVideo = nil
+                    },
+                    onFinished: {
+                        guard settings.autoPlayNext,
+                              let index = filteredVideos.firstIndex(where: { $0.id == video.id }),
+                              filteredVideos.indices.contains(index + 1) else { return }
+                        selectedVideo = filteredVideos[index + 1]
                     }
                 )
+                .id(video.id)
             }
             .sheet(isPresented: $showLANUpload) {
                 LANUploadSheet()
@@ -292,6 +308,17 @@ public struct MediaLibraryHomeView: View {
             .sheet(isPresented: $showSubtitleTasks) {
                 SubtitleTaskCenterView()
             }
+            .alert("新建播放列表", isPresented: $showCreatePlaylist) {
+                TextField("播放列表名称", text: $newPlaylistName)
+                Button("创建") {
+                    if let playlist = playlists.create(name: newPlaylistName) {
+                        selectedPlaylistID = playlist.id
+                        filterTab = 3
+                    }
+                    newPlaylistName = ""
+                }
+                Button("取消", role: .cancel) { newPlaylistName = "" }
+            } message: { Text("可以从视频卡片右侧菜单添加视频。") }
             .fileImporter(
                 isPresented: $isFileImporterPresented,
                 allowedContentTypes: supportedVideoContentTypes,
@@ -448,6 +475,7 @@ public struct MediaLibraryHomeView: View {
         HStack(spacing: 10) {
             tabButton(title: "全部", index: 0)
             tabButton(title: "精彩剪辑", index: 1)
+            tabButton(title: "播放列表", index: 3)
             // 私密文件夹 Tab：受设置控制是否显示
             if settings.showVaultInTabBar {
                 tabButton(title: "私密文件夹 🔒", index: 2)
@@ -458,6 +486,32 @@ public struct MediaLibraryHomeView: View {
         .padding(.top, 8)
     }
 
+    private var playlistBar: some View {
+        HStack {
+            Menu {
+                ForEach(playlists.playlists) { playlist in
+                    Button(playlist.name) { selectedPlaylistID = playlist.id }
+                }
+            } label: {
+                Label(playlists.playlists.first(where: { $0.id == selectedPlaylistID })?.name ?? "选择播放列表", systemImage: "list.bullet")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            Spacer()
+            if let selectedPlaylistID {
+                Button(role: .destructive) {
+                    playlists.delete(selectedPlaylistID)
+                    self.selectedPlaylistID = playlists.playlists.first?.id
+                } label: { Image(systemName: "trash") }
+                .accessibilityLabel("删除播放列表")
+            }
+            Button { showCreatePlaylist = true } label: { Image(systemName: "plus.circle.fill") }
+                .accessibilityLabel("新建播放列表")
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 22)
+        .padding(.top, 10)
+    }
+
     private func tabButton(title: String, index: Int) -> some View {
         Button(action: {
             if index == 2 && !showVaultUnlocked {
@@ -465,6 +519,7 @@ public struct MediaLibraryHomeView: View {
                 triggerVaultBiometrics()
             } else {
                 withAnimation {
+                    if index == 3 && selectedPlaylistID == nil { selectedPlaylistID = playlists.playlists.first?.id }
                     filterTab = index
                 }
             }
@@ -488,11 +543,11 @@ public struct MediaLibraryHomeView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.white.opacity(0.2))
 
-            Text(filterTab == 2 ? "私密文件夹为空" : "暂无视频文件")
+            Text(filterTab == 2 ? "私密文件夹为空" : (filterTab == 3 ? "播放列表为空" : "暂无视频文件"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white.opacity(0.7))
 
-            Text(filterTab == 2 ? "长按列表视频可将视频移入私密文件夹" : "可以通过右上角 [+] 导入视频，或点击 [无线传片] 电脑免线快传")
+            Text(filterTab == 2 ? "长按列表视频可将视频移入私密文件夹" : (filterTab == 3 ? "先新建播放列表，再从视频菜单添加视频" : "可以通过右上角 [+] 导入视频，或点击 [无线传片] 电脑免线快传"))
                 .font(.system(size: 13))
                 .foregroundColor(.white.opacity(0.4))
                 .multilineTextAlignment(.center)

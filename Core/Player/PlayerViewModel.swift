@@ -17,6 +17,7 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var isBuffering: Bool = false
     @Published public var playbackErrorMessage: String? = nil
     @Published public var playbackRate: Float = 1.0
+    public var onPlaybackFinished: (() -> Void)?
 
     // AVPlayer 不支持的容器由 KSPlayer 自动从 AVFoundation 回退到 FFmpeg。
     @Published public private(set) var isCompatibilityMode: Bool = false
@@ -34,6 +35,9 @@ public final class PlayerViewModel: ObservableObject {
     private var seekFrameTask: Task<Void, Never>?
     private var resolvedVideoURL: URL?
     private var subtitleIndex = 0
+    #if os(iOS)
+    private let remoteControls = RemotePlaybackControls()
+    #endif
 
     // AV1 (libdav1d) 软解渲染状态
     @Published public var isAV1SoftwareMode: Bool = false
@@ -63,6 +67,7 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var generatingSubtitleStatusText: String = ""
     @Published public var subtitleErrorMessage: String? = nil
     @Published public var subtitles: [SubtitleLine] = []
+    @Published public private(set) var usesExternalSubtitles = false
 
     // 无损剪辑模式
     @Published public var isClipMode: Bool = false
@@ -70,10 +75,14 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var clipEndTime: TimeInterval = 0
     @Published public var isExportingClip: Bool = false
     @Published public var exportMessage: String? = nil
+    @Published public var clipSegments: [ClipSegment] = []
+    @Published public var clipExportStrategy: ClipExportStrategy = .fastCopy
 
     @Published public private(set) var currentVideoURL: URL?
     public private(set) var currentVideoIsPrivate: Bool = false
     private var timeObserverToken: Any?
+    private var endObserverToken: NSObjectProtocol?
+    private var didFinishPlayback = false
     private var controlsHideTimer: Task<Void, Never>?
     private var subtitleTaskObservation: AnyCancellable?
 
@@ -93,11 +102,16 @@ public final class PlayerViewModel: ObservableObject {
         subtitleErrorMessage = nil
         playbackErrorMessage = nil
         subtitles = []
+        usesExternalSubtitles = false
         currentSubtitle = nil
         isAISubtitleEnabled = false
         subtitleIndex = 0
         self.currentVideoURL = url
+        didFinishPlayback = false
         self.currentVideoIsPrivate = isPrivate
+        #if os(iOS)
+        remoteControls.attach(to: self, title: isPrivate ? "私密视频" : url.deletingPathExtension().lastPathComponent)
+        #endif
         resetControlsTimeout()
 
         #if os(iOS)
@@ -141,12 +155,66 @@ public final class PlayerViewModel: ObservableObject {
                     let shouldPlay = isPlaying
                     configureMedia(url: readable, savedPosition: savedPosition, session: session)
                     if shouldPlay { isPlaying = false; togglePlayPause() }
+                    await loadExternalSubtitles(for: url, isPrivate: true, session: session)
                 } catch { if session == playbackSession { playbackErrorMessage = error.localizedDescription } }
             }
         } else {
             resolvedVideoURL = url
             configureMedia(url: url, savedPosition: savedPosition, session: session)
+            loadTask = Task { await loadExternalSubtitles(for: url, isPrivate: false, session: session) }
         }
+    }
+
+    private func loadExternalSubtitles(for url: URL, isPrivate: Bool, session: UUID) async {
+        guard let lines = await ExternalSubtitleStore.shared.load(for: url, isPrivate: isPrivate),
+              !Task.isCancelled, session == playbackSession else { return }
+        subtitles = lines
+        usesExternalSubtitles = true
+        isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
+        updateActiveSubtitle(at: currentTime)
+    }
+
+    public func importExternalSubtitles(from source: URL) async throws {
+        guard let url = currentVideoURL else { return }
+        let session = playbackSession
+        let lines = try await ExternalSubtitleStore.shared.importSubtitle(from: source, for: url, isPrivate: currentVideoIsPrivate)
+        guard session == playbackSession else { return }
+        subtitles = lines
+        usesExternalSubtitles = true
+        isAISubtitleEnabled = true
+        updateActiveSubtitle(at: currentTime)
+    }
+
+    public func useGeneratedSubtitles() {
+        guard let url = currentVideoURL else { return }
+        usesExternalSubtitles = false
+        if let lines = SubtitleTaskManager.shared.subtitles(for: url) ?? AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: url) {
+            subtitles = lines
+            updateActiveSubtitle(at: currentTime)
+        }
+    }
+
+    public func editSubtitle(_ id: UUID, originalText: String, translatedText: String?,
+                             startTime: TimeInterval, endTime: TimeInterval) async throws {
+        guard let url = currentVideoURL,
+              let index = subtitles.firstIndex(where: { $0.id == id }),
+              startTime.isFinite, endTime.isFinite, startTime >= 0, endTime > startTime,
+              !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(domain: "SubtitleEdit", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "请检查字幕内容与起止时间"])
+        }
+        let session = playbackSession
+        var edited = subtitles
+        edited[index] = SubtitleLine(id: id, startTime: startTime, endTime: endTime,
+            originalText: originalText.trimmingCharacters(in: .whitespacesAndNewlines),
+            translatedText: translatedText?.trimmingCharacters(in: .whitespacesAndNewlines))
+        edited.sort { $0.startTime < $1.startTime }
+        try await ExternalSubtitleStore.shared.saveEdited(edited, for: url, isPrivate: currentVideoIsPrivate)
+        guard session == playbackSession else { return }
+        subtitles = edited
+        usesExternalSubtitles = true
+        subtitleIndex = 0
+        updateActiveSubtitle(at: currentTime)
     }
 
     private func configureMedia(url: URL, savedPosition: Double, session: UUID) {
@@ -210,6 +278,14 @@ public final class PlayerViewModel: ObservableObject {
         self.isAV1SoftwareMode = false
         let playerItem = AVPlayerItem(url: url)
         let nativePlayer = AVPlayer(playerItem: playerItem)
+        endObserverToken = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: playerItem, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, session == self.playbackSession else { return }
+                self.finishPlayback()
+            }
+        }
         nativePlayer.volume = self.volume
         nativePlayer.isMuted = false
         self.player = nativePlayer
@@ -275,6 +351,9 @@ public final class PlayerViewModel: ObservableObject {
                 if total.isFinite, total > 0 { self.duration = total }
                 self.updateActiveSubtitle(at: current)
                 self.saveCurrentProgress()
+                #if os(iOS)
+                self.remoteControls.update()
+                #endif
             }
         }
         coordinator.onFinish = { [weak self] _, error in
@@ -283,6 +362,7 @@ public final class PlayerViewModel: ObservableObject {
                 self.isPlaying = false
                 self.isBuffering = false
                 if let error { self.playbackErrorMessage = "视频解码失败：\(error.localizedDescription)" }
+                else { self.finishPlayback() }
             }
         }
     }
@@ -314,6 +394,9 @@ public final class PlayerViewModel: ObservableObject {
 
                 self.currentTime = targetTime
                 self.updateActiveSubtitle(at: targetTime)
+                #if os(iOS)
+                self.remoteControls.update()
+                #endif
 
                 if abs(targetTime - lastSaveTime) >= 2.0 {
                     lastSaveTime = targetTime
@@ -330,6 +413,7 @@ public final class PlayerViewModel: ObservableObject {
 
                 if targetTime >= self.duration && self.duration > 0 {
                     self.pause()
+                    self.finishPlayback()
                 }
             }
         }
@@ -345,9 +429,27 @@ public final class PlayerViewModel: ObservableObject {
             isPlaying = true
             resetControlsTimeout()
         }
+        #if os(iOS)
+        remoteControls.update(force: true)
+        #endif
     }
 
-    public func pause() { playbackDriver?.pause(); isPlaying = false }
+    public func togglePlayPauseIfPaused() { if !isPlaying { togglePlayPause() } }
+
+    public func pause() {
+        playbackDriver?.pause()
+        isPlaying = false
+        #if os(iOS)
+        remoteControls.update(force: true)
+        #endif
+    }
+
+    private func finishPlayback() {
+        guard currentVideoURL != nil, !didFinishPlayback else { return }
+        didFinishPlayback = true
+        isPlaying = false
+        onPlaybackFinished?()
+    }
 
     public func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration))
@@ -355,6 +457,9 @@ public final class PlayerViewModel: ObservableObject {
         currentTime = clamped
         updateActiveSubtitle(at: clamped)
         saveCurrentProgress()
+        #if os(iOS)
+        remoteControls.update(force: true)
+        #endif
         if isAV1SoftwareMode, let engine = av1Engine {
             seekFrameTask?.cancel()
             let session = playbackSession
@@ -379,6 +484,9 @@ public final class PlayerViewModel: ObservableObject {
     public func setPlaybackRate(_ rate: Float) {
         self.playbackRate = rate
         if isPlaying { playbackDriver?.play(rate: rate, volume: volume) }
+        #if os(iOS)
+        remoteControls.update(force: true)
+        #endif
     }
 
     public func triggerControlsDisplay() {
@@ -408,6 +516,7 @@ public final class PlayerViewModel: ObservableObject {
         enhanceWithGPT: Bool = false
     ) {
         guard let url = currentVideoURL else { return }
+        usesExternalSubtitles = false
         _ = SubtitleTaskManager.shared.enqueue(
             videoURL: url,
             videoTitle: url.lastPathComponent,
@@ -432,7 +541,7 @@ public final class PlayerViewModel: ObservableObject {
         } else {
             isGeneratingSubtitles = false
         }
-        if let lines = SubtitleTaskManager.shared.subtitles(for: url), !lines.isEmpty, lines != subtitles {
+        if !usesExternalSubtitles, let lines = SubtitleTaskManager.shared.subtitles(for: url), !lines.isEmpty, lines != subtitles {
             subtitles = lines
             isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
             updateActiveSubtitle(at: currentTime)
@@ -446,21 +555,34 @@ public final class PlayerViewModel: ObservableObject {
         try? FileManager.default.removeItem(at: privateClipRoot)
     }
 
-    public func exportClip() {
-        guard let url = currentVideoURL else { return }
-        let startTime = CMTime(seconds: clipStartTime, preferredTimescale: 600)
-        let endTime = CMTime(seconds: clipEndTime, preferredTimescale: 600)
+    public func addClipSegment() {
+        guard clipStartTime.isFinite, clipEndTime.isFinite,
+              clipStartTime >= 0, clipEndTime <= duration,
+              clipEndTime - clipStartTime >= 0.2 else { return }
+        clipSegments.append(ClipSegment(start: clipStartTime, end: clipEndTime))
+        exportMessage = "已加入第 \(clipSegments.count) 段"
+    }
 
+    public func removeClipSegment(_ id: UUID) {
+        clipSegments.removeAll { $0.id == id }
+    }
+
+    public func exportClip() {
+        guard let url = currentVideoURL, !isExportingClip else { return }
+        let segments = clipSegments.isEmpty ? [ClipSegment(start: clipStartTime, end: clipEndTime)] : clipSegments
+        guard segments.allSatisfy({ $0.start >= 0 && $0.end <= duration && $0.end - $0.start >= 0.2 }) else {
+            exportMessage = "请检查片段的起止时间"
+            return
+        }
         let privateClip = currentVideoIsPrivate
         let clipsDir = privateClip ? Self.privateClipRoot.appendingPathComponent(UUID().uuidString, isDirectory: true) : MediaLibraryManager.shared.clipsDirectory
-        let clipName = "Clip_\(UUID().uuidString).mp4"
-        let outputURL = clipsDir.appendingPathComponent(clipName)
-
         isExportingClip = true
-        exportMessage = "正在无损导出..."
+        exportMessage = "准备导出 \(segments.count) 段…"
 
         clipTask = Task {
             defer { if privateClip { try? FileManager.default.removeItem(at: clipsDir) } }
+            var completed = 0
+            var reencoded = 0
             do {
                 if privateClip {
                     try FileManager.default.createDirectory(at: clipsDir, withIntermediateDirectories: true)
@@ -469,26 +591,39 @@ public final class PlayerViewModel: ObservableObject {
                     #endif
                 }
                 let readable = try await VaultManager.shared.readableURL(for: url)
-                defer { VaultManager.shared.releaseReadableURL(readable); if privateClip { try? FileManager.default.removeItem(at: outputURL) } }
-                try await LosslessClipManager.shared.exportLosslessClip(
-                    assetURL: readable,
-                    outputURL: outputURL,
-                    startTime: startTime,
-                    endTime: endTime,
-                    saveToPhotos: !privateClip
-                )
-                if privateClip {
-                    let encrypted = SafeFileImport.availableURL(name: clipName + ".vault", in: MediaLibraryManager.shared.vaultDirectory)
-                    try await VaultManager.shared.encryptFile(at: outputURL, destinationURL: encrypted)
+                defer { VaultManager.shared.releaseReadableURL(readable) }
+                for (index, segment) in segments.enumerated() {
+                    try Task.checkCancellation()
+                    exportMessage = "正在导出第 \(index + 1)/\(segments.count) 段…"
+                    let clipName = "Clip_\(UUID().uuidString).mp4"
+                    let outputURL = clipsDir.appendingPathComponent(clipName)
+                    let mode = try await LosslessClipManager.shared.exportLosslessClip(
+                        assetURL: readable,
+                        outputURL: outputURL,
+                        startTime: CMTime(seconds: segment.start, preferredTimescale: 600),
+                        endTime: CMTime(seconds: segment.end, preferredTimescale: 600),
+                        saveToPhotos: false,
+                        strategy: clipExportStrategy
+                    )
+                    if mode == .reencoded { reencoded += 1 }
+                    if privateClip {
+                        defer { try? FileManager.default.removeItem(at: outputURL) }
+                        let encrypted = SafeFileImport.availableURL(name: clipName + ".vault", in: MediaLibraryManager.shared.vaultDirectory)
+                        try await VaultManager.shared.encryptFile(at: outputURL, destinationURL: encrypted)
+                    }
+                    completed += 1
                 }
-                self.exportMessage = privateClip ? "已加密保存到私密文件夹" : "导出成功！已存入剪辑库"
+                self.exportMessage = "已导出 \(completed) 段\(privateClip ? "到私密文件夹" : "到剪辑库")\(reencoded > 0 ? "，其中 \(reencoded) 段重新编码" : "，码流复制")"
+                clipSegments.removeAll()
                 MediaLibraryManager.shared.reloadLibrary()
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 self.isClipMode = false
                 self.isExportingClip = false
                 self.exportMessage = nil
             } catch {
-                self.exportMessage = "导出失败: \(error.localizedDescription)"
+                if !clipSegments.isEmpty { clipSegments = Array(segments.dropFirst(completed)) }
+                MediaLibraryManager.shared.reloadLibrary()
+                self.exportMessage = "已完成 \(completed)/\(segments.count) 段；其余未完成：\(error.localizedDescription)"
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 self.isExportingClip = false
                 self.exportMessage = nil
@@ -527,6 +662,9 @@ public final class PlayerViewModel: ObservableObject {
                 self.updateActiveSubtitle(at: current)
                 // 定期记录进度
                 self.saveCurrentProgress()
+                #if os(iOS)
+                self.remoteControls.update()
+                #endif
             }
         }
     }
@@ -559,6 +697,9 @@ public final class PlayerViewModel: ObservableObject {
 
     private func cleanupPlaybackEngines(saveProgress: Bool) {
         if saveProgress { saveCurrentProgress(); PlaybackHistoryManager.shared.flush() }
+        #if os(iOS)
+        remoteControls.clear()
+        #endif
         if currentVideoIsPrivate { clipTask?.cancel() }
         playbackSession = UUID()
         loadTask?.cancel(); durationTask?.cancel(); firstFrameTask?.cancel(); audioTask?.cancel(); seekFrameTask?.cancel()
@@ -577,6 +718,10 @@ public final class PlayerViewModel: ObservableObject {
         if let token = timeObserverToken {
             oldPlayer?.removeTimeObserver(token)
             timeObserverToken = nil
+        }
+        if let endObserverToken {
+            NotificationCenter.default.removeObserver(endObserverToken)
+            self.endObserverToken = nil
         }
         oldPlayer?.replaceCurrentItem(with: nil)
         player = nil

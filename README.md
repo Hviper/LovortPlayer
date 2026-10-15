@@ -11,8 +11,8 @@
 | **核心播放** | 原生优先 + FFmpeg 兼容回退 | ✅ 已完成 | `Core/Player/PlayerViewModel.swift`<br>`Views/Player/NativeVideoPlayerView.swift` | MP4/MOV 走 AVFoundation；MKV/AVI/WebM 等由 KSPlayer 自动回退 FFmpeg |
 | **Lovort 交互** | 极简深色全屏手势 | ✅ 已完成 | `Views/Player/FullscreenVideoPlayerView.swift` | 左右滑屏调亮度/音量，双击快进快退，自动淡出悬浮控制 |
 | **隐私保险箱** | Face ID + AES-GCM | ✅ 已完成 | `Core/Vault/VaultManager.swift` | 媒体库标题长按 1.2s 触发生物识别，解密隐藏视频沙盒 |
-| **无损剪辑** | GOP Passthrough 剪裁 | ✅ 已完成 | `Core/Clip/LosslessClipManager.swift`<br>`Views/Player/InPlayerClipBar.swift` | 播放内标记 In/Out 毫秒点，秒级无损码流复制导出 |
-| **局域网直传** | 流式 HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 一次性口令、流式落盘、空间/格式校验、自动入库，避免大文件驻留内存 |
+| **片段剪辑** | 快速复制 / 精确裁切 | ✅ 已完成 | `Core/Clip/LosslessClipManager.swift`<br>`Views/Player/InPlayerClipBar.swift` | 支持多区间；快速复制可能对齐关键帧，不兼容时重新编码；精确裁切始终重新编码 |
+| **局域网直传** | 流式 HTTP Server + 网页前端 | ✅ 已完成 | `Core/LANServer/`<br>`Views/Components/LANUploadSheet.swift` | 一次性口令、4 MiB 分片续传、空间/格式校验、自动入库 |
 | **媒体库** | 16:9 卡片瀑布流 | ✅ 已完成 | `Views/Main/MediaLibraryHomeView.swift`<br>`Views/Main/VideoCardView.swift` | 封面卡片流、时长/分辨率标签、分类 Tabs |
 | **AI 字幕引擎** | 渐进式离线转写 + 多翻译服务 | ✅ 已完成 | `Core/AISubtitle/LocalWhisperSubtitleService.swift`<br>`Core/AISubtitle/SubtitleTranslationProvider.swift` | 播放点优先的 4 分钟分片、断点缓存；Apple/火山机器翻译/智谱/火山方舟/自定义 API/DeepL/Google/Azure/GPT 翻译；双语 JSON/SRT |
 | **视频导出** | 分享 / 相册 / 文件 | ✅ 已完成 | `Core/Export/VideoExportManager.swift` | 系统分享面板、保存到系统相册、导出到“文件”App |
@@ -53,7 +53,7 @@
 
 1. **真实影片回归集**：用日语动漫、英语美剧和多人对白样本持续评估字错率、时间轴和翻译一致性。
 2. **真实设备性能测试**：评估高码率 MKV 的耗电、发热与后台内存峰值。
-3. **局域网断点续传**：在现有流式落盘基础上加入可恢复的分片协议。
+3. **真机工作流验证**：在 iPhone 13 上测量 Large V3 离线转写、长视频备份恢复和分片传输的耗时与稳定性。
 
 ---
 

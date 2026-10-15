@@ -13,6 +13,7 @@ public struct VideoCardView: View {
     @State private var thumbnail: Image? = nil
     @State private var showSubtitleExport = false
     @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
+    @ObservedObject private var playlists = PlaylistStore.shared
 
     private var subtitleTask: SubtitleTaskItem? {
         subtitleTasks.task(for: video.fileURL)
@@ -141,6 +142,7 @@ public struct VideoCardView: View {
                     // 快捷操作菜单 ("...")
                     Menu {
                         subtitleMenu
+                        playlistMenu
                         Button { showSubtitleExport = true } label: {
                             Label("导出带字幕视频", systemImage: "captions.bubble")
                         }
@@ -200,6 +202,7 @@ public struct VideoCardView: View {
         .buttonStyle(.plain)
         .contextMenu {
             subtitleMenu
+            playlistMenu
             Button { showSubtitleExport = true } label: {
                 Label("导出带字幕视频", systemImage: "captions.bubble")
             }
@@ -242,6 +245,22 @@ public struct VideoCardView: View {
         }
         .task {
             await generateThumbnail()
+        }
+    }
+
+    @ViewBuilder
+    private var playlistMenu: some View {
+        if !video.isHidden, !playlists.playlists.isEmpty {
+            Menu("播放列表") {
+                ForEach(playlists.playlists) { playlist in
+                    let included = playlists.contains(videoID: video.id, in: playlist.id)
+                    Button {
+                        playlists.setVideo(video.id, in: playlist.id, included: !included)
+                    } label: {
+                        Label(playlist.name, systemImage: included ? "checkmark.circle.fill" : "plus.circle")
+                    }
+                }
+            }
         }
     }
 

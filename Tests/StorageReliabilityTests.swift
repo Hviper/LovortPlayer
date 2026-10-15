@@ -102,4 +102,55 @@ final class StorageReliabilityTests: XCTestCase {
         try VaultFileCryptor.decrypt(source: source, destination: output, key: key)
         XCTAssertEqual(try Data(contentsOf: output), plain)
     }
+    func testPasswordBackupRoundTripAndWrongPasswordCannotOverwrite() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.zip")
+        let encrypted = root.appendingPathComponent("library.lovortbackup")
+        let output = root.appendingPathComponent("restored.zip")
+        let data = Data(repeating: 0x5A, count: 4 * 1024 * 1024 + 19)
+        try data.write(to: source)
+        try BackupCryptor.encrypt(source: source, destination: encrypted, password: "test-password-123")
+        XCTAssertThrowsError(try BackupCryptor.decrypt(source: encrypted, destination: output, password: "wrong-password"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        try BackupCryptor.decrypt(source: encrypted, destination: output, password: "test-password-123")
+        XCTAssertEqual(try Data(contentsOf: output), data)
+    }
+    func testASSDialogueParsingKeepsCommasAndStripsStyleOverrides() {
+        let content = """
+        [Script Info]
+        Title: sample
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+        Dialogue: 0,0:00:01.20,0:00:03.40,Default,,0,0,0,,{\\i1}Hello, world\\N第二行
+        """
+        let lines = ASSParser.parse(content)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.startTime, 1.2)
+        XCTAssertEqual(lines.first?.endTime, 3.4)
+        XCTAssertEqual(lines.first?.originalText, "Hello, world\n第二行")
+    }
+    func testLANResumeKeepsPartialBytesAndFinalizesOnce() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("Documents", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let store = ResumableUploadStore(root: root.appendingPathComponent("Sessions"))
+        let id = UUID()
+        XCTAssertEqual(try store.status(id: id, name: "movie.mp4", size: 5).offset, 0)
+        let partial = try store.beginChunk(id: id, offset: 0, length: 3)
+        let first = try FileHandle(forWritingTo: partial)
+        try first.write(contentsOf: Data("abc".utf8))
+        try first.close()
+        store.abortChunk(id: id)
+        XCTAssertEqual(try store.status(id: id, name: "movie.mp4", size: 5).offset, 3)
+        XCTAssertThrowsError(try store.beginChunk(id: id, offset: 0, length: 2))
+        let resumed = try store.beginChunk(id: id, offset: 3, length: 2)
+        let second = try FileHandle(forWritingTo: resumed)
+        try second.seekToEnd()
+        try second.write(contentsOf: Data("de".utf8))
+        try second.close()
+        let (state, saved) = try store.finishChunk(id: id, destinationDirectory: destination)
+        XCTAssertTrue(state.complete)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(saved)), Data("abcde".utf8))
+        XCTAssertTrue(try store.status(id: id, name: "movie.mp4", size: 5).complete)
+    }
 }

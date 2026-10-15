@@ -7,12 +7,17 @@ import LovortPlayerCore
 public struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var showVaultPassword = false
     @State private var showResetConfirm = false
     @State private var showClearCacheConfirm = false
     @State private var isClearingCache = false
     @State private var showClearCacheDone = false
+    @State private var isCheckingUpdate = false
+    @State private var showUpdateResult = false
+    @State private var updateResult = ""
+    @State private var newerBuildAvailable = false
 
     public init() {}
 
@@ -33,6 +38,10 @@ public struct SettingsView: View {
                             orientationPicker
                             divider
                             defaultVolumeRow
+                            divider
+                            Toggle("播完自动播放下一集", isOn: $settings.autoPlayNext)
+                                .tint(settings.themeColor.color)
+                                .padding(16)
                         }
 
                         settingsSection(title: "字幕与离线模型", icon: "captions.bubble") {
@@ -70,6 +79,16 @@ public struct SettingsView: View {
                         // 存储与缓存
                         settingsSection(title: "存储与缓存", icon: "internaldrive") {
                             cacheRow
+                        }
+
+                        settingsSection(title: "数据迁移", icon: "externaldrive") {
+                            NavigationLink {
+                                LibraryBackupView()
+                            } label: {
+                                Label("备份与恢复", systemImage: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(.white)
+                                    .padding(16)
+                            }
                         }
 
                         // 还原设置
@@ -139,6 +158,14 @@ public struct SettingsView: View {
         } message: {
             Text("将把所有设置恢复为出厂默认值，不影响已导入视频和保险箱密码。")
         }
+        .alert("版本检查", isPresented: $showUpdateResult) {
+            if newerBuildAvailable {
+                Button("打开下载页") {
+                    if let url = URL(string: "https://github.com/Hviper/LovortPlayer/releases/tag/latest") { openURL(url) }
+                }
+            }
+            Button("完成", role: .cancel) {}
+        } message: { Text(updateResult) }
     }
 
     // MARK: - Section 容器
@@ -461,15 +488,51 @@ public struct SettingsView: View {
 
     // MARK: - 版本信息
     private var versionInfo: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             Text("LovortPlayer")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white.opacity(0.3))
-            Text("v1.0 · Lovort 沉浸黑灰 · AV1 软解引擎")
+            Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—") · 构建 \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—")")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.2))
+            Button {
+                Task { await checkForUpdates() }
+            } label: {
+                if isCheckingUpdate { ProgressView().tint(settings.themeColor.color) }
+                else { Text("检查新版本").font(.system(size: 13, weight: .semibold)) }
+            }
+            .disabled(isCheckingUpdate)
+            .foregroundStyle(settings.themeColor.color)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 4)
+    }
+
+    private struct PublishedBuild: Decodable {
+        let version: String
+        let buildNumber: Int
+    }
+
+    private func checkForUpdates() async {
+        isCheckingUpdate = true
+        defer { isCheckingUpdate = false; showUpdateResult = true }
+        guard var components = URLComponents(string: "https://github.com/Hviper/LovortPlayer/releases/download/latest/build-info.json") else { return }
+        components.queryItems = [URLQueryItem(name: "check", value: String(Int(Date().timeIntervalSince1970)))]
+        do {
+            var request = URLRequest(url: components.url!)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 15
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            let published = try JSONDecoder().decode(PublishedBuild.self, from: data)
+            let installed = Int(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0
+            newerBuildAvailable = published.buildNumber > installed
+            updateResult = newerBuildAvailable
+                ? "有新构建：v\(published.version) (\(published.buildNumber))。下载 IPA 后，按你当前的签名方式安装。"
+                : "已是最新构建（\(installed)）。"
+        } catch {
+            newerBuildAvailable = false
+            updateResult = "暂时无法检查：\(error.localizedDescription)"
+        }
     }
 }

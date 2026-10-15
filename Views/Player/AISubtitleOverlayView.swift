@@ -61,12 +61,12 @@ public struct AISubtitleOverlayView: View {
             if display.textMode != .original, let trans = sub.translatedText, !trans.isEmpty {
                 Text(trans)
                     .font(.system(size: fontSize, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
+                    .foregroundColor(captionColor)
             }
             if !sub.originalText.isEmpty, (display.textMode == .original || (display.textMode == .bilingual && sub.originalText != sub.translatedText) || (sub.translatedText?.isEmpty ?? true)) {
                 Text(sub.originalText)
                     .font(.system(size: (display.textMode == .original || (sub.translatedText?.isEmpty ?? true)) ? fontSize : fontSize * 0.76, weight: .medium, design: .rounded))
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundColor(captionColor.opacity(0.9))
             }
         }
         .multilineTextAlignment(.center)
@@ -75,6 +75,15 @@ public struct AISubtitleOverlayView: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
         .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var captionColor: Color {
+        switch display.textColor {
+        case .white: return .white
+        case .yellow: return .yellow
+        case .cyan: return .cyan
+        case .green: return .green
+        }
     }
 
 }

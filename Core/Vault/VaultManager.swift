@@ -5,6 +5,15 @@ import Security
 import CommonCrypto
 import Combine
 
+public struct BackupVaultSecrets: Codable, Sendable {
+    public let masterKey: Data?
+    public let pinRecord: Data?
+    public init(masterKey: Data?, pinRecord: Data?) {
+        self.masterKey = masterKey
+        self.pinRecord = pinRecord
+    }
+}
+
 @MainActor
 public final class VaultManager: ObservableObject {
     public static let shared = VaultManager()
@@ -86,6 +95,25 @@ public final class VaultManager: ObservableObject {
         } catch { return (false, error.localizedDescription) }
     }
     public func lockVault() { session = UUID(); isUnlocked = false; isDecoyMode = false }
+    public func exportBackupSecrets() throws -> BackupVaultSecrets {
+        guard !hasPassword || isUnlocked else { throw error("请先解锁保险箱再备份") }
+        return BackupVaultSecrets(masterKey: readKeychain(keyTag), pinRecord: readKeychain(pinTag))
+    }
+    public func restoreBackupSecrets(_ secrets: BackupVaultSecrets) throws {
+        guard readKeychain(keyTag) == nil, readKeychain(pinTag) == nil else { throw error("此设备已有保险箱，不能覆盖其密钥") }
+        guard (secrets.masterKey == nil) == (secrets.pinRecord == nil) else { throw error("备份中的保险箱凭据不完整") }
+        guard secrets.masterKey == nil || secrets.masterKey?.count == 32,
+              secrets.pinRecord == nil || secrets.pinRecord?.count == 48 else { throw error("备份中的保险箱凭据无效") }
+        if let key = secrets.masterKey { try writeKeychain(keyTag, data: key) }
+        do {
+            if let pin = secrets.pinRecord { try writeKeychain(pinTag, data: pin) }
+        } catch {
+            if secrets.masterKey != nil {
+                SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrAccount: keyTag] as CFDictionary)
+            }
+            throw error
+        }
+    }
     public func encryptFile(at source: URL, destinationURL destination: URL) async throws {
         guard hasPassword else { throw error("请先设置保险箱密码") }
         let key = try masterKey()

@@ -19,6 +19,7 @@ public final class LANServerManager: ObservableObject, @unchecked Sendable {
 
     public func startServer(port: UInt16 = 8080) throws {
         guard listener == nil else { return }
+        ResumableUploadStore.shared.cleanupExpired()
         self.port = port
         accessToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
@@ -141,6 +142,7 @@ private final class LANUploadConnection: @unchecked Sendable {
     private var requestedFileName: String?
     private var temporaryURL: URL?
     private var fileHandle: FileHandle?
+    private var resumableUploadID: UUID?
     private var isFinished = false
 
     init(
@@ -210,7 +212,10 @@ private final class LANUploadConnection: @unchecked Sendable {
             send(status: "200 OK", contentType: "text/html; charset=utf-8", body: Data(page.utf8))
             return
         }
-        guard requestLine.hasPrefix("POST /upload ") else {
+        let isStatus = requestLine.hasPrefix("POST /upload/status ")
+        let isChunk = requestLine.hasPrefix("POST /upload/chunk ")
+        let isLegacyUpload = requestLine.hasPrefix("POST /upload ")
+        guard isStatus || isChunk || isLegacyUpload else {
             fail(status: "404 Not Found", message: "路径不存在")
             return
         }
@@ -218,6 +223,9 @@ private final class LANUploadConnection: @unchecked Sendable {
         var contentLength: Int64?
         var encodedName: String?
         var requestToken: String?
+        var uploadID: UUID?
+        var uploadOffset: Int64?
+        var uploadTotalSize: Int64?
         for line in lines.dropFirst() {
             let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
@@ -225,6 +233,9 @@ private final class LANUploadConnection: @unchecked Sendable {
             case "content-length": contentLength = Int64(parts[1].trimmingCharacters(in: .whitespaces))
             case "x-file-name": encodedName = parts[1].trimmingCharacters(in: .whitespaces)
             case "x-upload-token": requestToken = parts[1].trimmingCharacters(in: .whitespaces)
+            case "x-upload-id": uploadID = UUID(uuidString: parts[1].trimmingCharacters(in: .whitespaces))
+            case "x-upload-offset": uploadOffset = Int64(parts[1].trimmingCharacters(in: .whitespaces))
+            case "x-file-size": uploadTotalSize = Int64(parts[1].trimmingCharacters(in: .whitespaces))
             default: break
             }
         }
@@ -232,13 +243,56 @@ private final class LANUploadConnection: @unchecked Sendable {
             fail(status: "403 Forbidden", message: "上传口令无效，请重新打开手机显示的网址")
             return
         }
+        let decodedName = encodedName?.removingPercentEncoding ?? encodedName ?? ""
+        let safeName = LANUploadPolicy.sanitizedFileName(decodedName)
+        if isStatus || isLegacyUpload, !safeName.isEmpty,
+           !LANUploadPolicy.allowedExtensions.contains(URL(fileURLWithPath: safeName).pathExtension.lowercased()) {
+            fail(status: "415 Unsupported Media Type", message: "不支持该文件格式")
+            return
+        }
+        if isStatus {
+            guard let uploadID, let uploadTotalSize, !safeName.isEmpty,
+                  uploadTotalSize > 0, uploadTotalSize <= LANUploadPolicy.maximumUploadBytes else {
+                fail(status: "400 Bad Request", message: "文件信息无效")
+                return
+            }
+            do {
+                let status = try ResumableUploadStore.shared.status(id: uploadID, name: safeName, size: uploadTotalSize)
+                guard status.complete || hasAvailableCapacity(for: uploadTotalSize - status.offset) else {
+                    fail(status: "507 Insufficient Storage", message: "设备可用空间不足")
+                    return
+                }
+                sendJSON(status)
+            } catch { fail(status: "409 Conflict", message: error.localizedDescription) }
+            return
+        }
+        if isChunk {
+            guard let uploadID, let uploadOffset, let contentLength else {
+                fail(status: "400 Bad Request", message: "缺少上传分片信息")
+                return
+            }
+            do {
+                let part = try ResumableUploadStore.shared.beginChunk(id: uploadID, offset: uploadOffset, length: contentLength)
+                resumableUploadID = uploadID
+                let handle = try FileHandle(forWritingTo: part)
+                try handle.seekToEnd()
+                temporaryURL = part
+                fileHandle = handle
+                expectedBodyBytes = contentLength
+                writeBody(initialBody)
+            } catch {
+                if resumableUploadID == uploadID {
+                    ResumableUploadStore.shared.abortChunk(id: uploadID)
+                }
+                fail(status: "409 Conflict", message: error.localizedDescription)
+            }
+            return
+        }
         guard let contentLength, contentLength > 0, contentLength <= LANUploadPolicy.maximumUploadBytes else {
             fail(status: "413 Payload Too Large", message: "文件大小无效或超过 50 GB")
             return
         }
-        let decodedName = encodedName?.removingPercentEncoding ?? encodedName ?? ""
-        let safeName = LANUploadPolicy.sanitizedFileName(decodedName)
-        guard !safeName.isEmpty, LANUploadPolicy.allowedExtensions.contains(URL(fileURLWithPath: safeName).pathExtension.lowercased()) else {
+        guard !safeName.isEmpty else {
             fail(status: "415 Unsupported Media Type", message: "不支持该文件格式")
             return
         }
@@ -281,10 +335,25 @@ private final class LANUploadConnection: @unchecked Sendable {
     }
 
     private func finishUpload() {
-        guard !isFinished, let temporaryURL, let requestedFileName else { return }
+        guard !isFinished, let temporaryURL else { return }
         isFinished = true
         try? fileHandle?.close()
         fileHandle = nil
+        if let uploadID = resumableUploadID {
+            do {
+                let (status, destination) = try ResumableUploadStore.shared.finishChunk(id: uploadID, destinationDirectory: destinationDirectory)
+                if let destination {
+                    completion(.success(ReceivedLANFile(url: destination, name: destination.lastPathComponent)))
+                }
+                sendJSON(status)
+            } catch {
+                completion(.failure(error))
+                send(status: "500 Internal Server Error", contentType: "text/plain; charset=utf-8",
+                     body: Data(error.localizedDescription.utf8), markFinished: false)
+            }
+            return
+        }
+        guard let requestedFileName else { return }
         do {
             let destination = uniqueDestination(for: requestedFileName)
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
@@ -301,7 +370,8 @@ private final class LANUploadConnection: @unchecked Sendable {
         guard !isFinished else { return }
         isFinished = true
         try? fileHandle?.close()
-        if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
+        if let resumableUploadID { ResumableUploadStore.shared.abortChunk(id: resumableUploadID) }
+        else if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
         completion(.failure(NSError(domain: "LANUpload", code: -1, userInfo: [NSLocalizedDescriptionKey: message])))
         send(status: status, contentType: "text/plain; charset=utf-8", body: Data(message.utf8), markFinished: false)
     }
@@ -314,6 +384,13 @@ private final class LANUploadConnection: @unchecked Sendable {
         connection.send(content: response, completion: .contentProcessed { [connection] _ in
             connection.cancel()
         })
+    }
+
+    private func sendJSON(_ status: LANUploadStatus) {
+        do {
+            let data = try JSONEncoder().encode(status)
+            send(status: "200 OK", contentType: "application/json; charset=utf-8", body: data)
+        } catch { fail(status: "500 Internal Server Error", message: "无法生成上传状态") }
     }
 
     private func uniqueDestination(for name: String) -> URL {
