@@ -46,7 +46,7 @@ private struct ChatGPTSubscriptionManagementSection: View {
     @State private var status = ""
 
     var body: some View {
-        Section("ChatGPT 订阅") {
+        Section {
             if let profile = authManager.currentProfile, profile.isLoggedIn {
                 LabeledContent("账户", value: profile.email)
                 Label(
@@ -78,6 +78,8 @@ private struct ChatGPTSubscriptionManagementSection: View {
                 .disabled(isLoggingIn)
             }
             if !status.isEmpty { Text(status).font(.footnote) }
+        } header: {
+            Text("ChatGPT 订阅")
         } footer: {
             Text("订阅登录仅用于 GPT 文本翻译与精修。离线 WhisperKit 和 Mac 转写无需登录；OpenAI Whisper 云端音频转写仍需 Platform API Key。")
         }
