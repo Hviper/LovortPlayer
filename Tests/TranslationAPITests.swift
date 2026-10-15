@@ -281,12 +281,25 @@ private final class ChatGPTSubscriptionURLProtocol: URLProtocol, @unchecked Send
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        var body = request.httpBody
+        if body == nil, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+            body = data
+        }
         guard request.url?.absoluteString == "https://chatgpt.com/backend-api/codex/responses",
               request.httpMethod == "POST",
               request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)",
               request.value(forHTTPHeaderField: "chatgpt-account-id") == "acct-test",
               request.value(forHTTPHeaderField: "OpenAI-Beta") == "responses=experimental",
-              let body = request.httpBody,
+              let body,
               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               object["model"] as? String == "gpt-6.1-sol",
               object["store"] as? Bool == false else {
