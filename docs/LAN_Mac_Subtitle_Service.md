@@ -16,6 +16,19 @@ python3 -m venv .venv
 
 启动终端显示访问口令。默认监听 `8765` 端口；在 Mac 的“系统设置 → 网络”查看同一 Wi-Fi 下的局域网 IP，手机填写 `IP:8765`。Mac 防火墙需要允许 Python 接收入站连接。口令持久化于 `~/.config/lovort-mac-subtitles/token`，只有当前 Mac 用户可读；不要分享给其他人。按 Ctrl-C 停止服务。
 
+## 可选 Docker Compose 入口
+
+默认仍由上述 Mac 原生进程使用 Metal/MLX 推理。需要容器化入口层时，在原生服务运行的同时执行：
+
+```bash
+cd MacSubtitleService
+docker compose up -d
+```
+
+Compose 启动 Nginx 网关，监听 Mac 的 `8766` 端口并转发到 Mac 原生服务的 `8765` 端口。此时手机可填 `Mac局域网IP:8766`，访问口令不变。网关不运行模型，也不保存音频；未来数据库或管理服务可作为独立 Compose 服务加入。Mac 防火墙需允许 `8766` 入站。停止网关使用 `docker compose down`，不会停止原生转写进程。
+
+Docker Desktop 的 Linux 容器无法直接使用 macOS Metal/MLX。把推理进程本身放进容器通常只能使用 CPU，可能比 iPhone 端更慢，因此当前不提供 CPU 容器作为默认转写方案。网关和原生端口都仍是未加密 HTTP；网关不构成安全隔离。
+
 ## 当前边界
 
 - 首版使用局域网 HTTP，音频和口令没有传输加密。仅在可信家庭网络使用；iOS 只接受私网 IP、`.local` 或 localhost 地址。私密视频被禁止发送到 Mac。
