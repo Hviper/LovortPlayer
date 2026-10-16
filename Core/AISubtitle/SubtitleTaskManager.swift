@@ -99,7 +99,7 @@ public final class SubtitleTaskManager: ObservableObject {
     public static let shared = SubtitleTaskManager()
     public static let backgroundTaskIdentifier = "com.hviper.lovortplayer.subtitle-processing"
 
-    public static func shouldSuspendForBackground(engine: AISubtitleEngineType) -> Bool {
+    nonisolated public static func shouldSuspendForBackground(engine: AISubtitleEngineType) -> Bool {
         engine != .lanMac
     }
 
