@@ -119,4 +119,4 @@ xcodegen generate
 xcodebuild test -project LovortPlayer.xcodeproj -scheme LovortPlayer -destination 'platform=iOS Simulator,name=iPhone 16' CODE_SIGNING_ALLOWED=NO SWIFT_ENABLE_EXPLICIT_MODULES=NO
 ```
 
-模型下载完成后，离线转写无需网络；第三方翻译和 GPT 精修需要网络，Apple 翻译需已安装对应语言包。iOS 对后台运行时长有限制，长任务建议保持 App 前台，暂停后可从检查点继续。
+模型下载完成后，离线转写无需网络；第三方翻译和 GPT 精修需要网络，Apple 翻译需已安装对应语言包。iOS 对后台运行时长有限制，锁屏时会提交系统 `BGProcessingTask` 请求，系统授予后台时间后继续处理；若系统暂不调度，任务会在下次打开 App 时从检查点自动续做。需要尽快完成长任务时仍建议保持 App 前台。

@@ -289,8 +289,6 @@ public struct MediaLibraryHomeView: View {
                     subtitleTasks.suspendForBackground()
                     PlaybackHistoryManager.shared.flush()
                     MediaIdentityStore.shared.flush()
-                } else if phase == .active {
-                    subtitleTasks.resumeAfterForeground()
                 }
             }
             .onChange(of: filterTab) { old, new in

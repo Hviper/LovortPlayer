@@ -97,6 +97,11 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
 @MainActor
 public final class SubtitleTaskManager: ObservableObject {
     public static let shared = SubtitleTaskManager()
+    public static let backgroundTaskIdentifier = "com.hviper.lovortplayer.subtitle-processing"
+
+    public static func shouldSuspendForBackground(engine: AISubtitleEngineType) -> Bool {
+        engine != .lanMac
+    }
 
     @Published public private(set) var tasks: [SubtitleTaskItem] = []
     @Published public private(set) var liveSubtitles: [String: [SubtitleLine]] = [:]
@@ -519,7 +524,8 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     public func suspendForBackground() {
-        let activeIDs = tasks.filter { $0.phase.isActive }.map(\.id)
+        // A Mac job is already durable on the Mac; keep the client free to reconnect later.
+        let activeIDs = tasks.filter { $0.phase.isActive && Self.shouldSuspendForBackground(engine: $0.engine) }.map(\.id)
         for id in activeIDs {
             guard let index = index(of: id) else { continue }
             tasks[index].phase = .pausedBySystem
@@ -530,8 +536,26 @@ public final class SubtitleTaskManager: ObservableObject {
             runTokens[id] = nil
             runPermits[id]?.invalidate()
         }
-        workerTask?.cancel()
+        if let runningTaskID,
+           let running = tasks.first(where: { $0.id == runningTaskID }),
+           Self.shouldSuspendForBackground(engine: running.engine) {
+            workerTask?.cancel()
+        }
         flushTasks()
+    }
+
+    /// Runs one queued task while the system has granted a BGProcessingTask window.
+    public func runForBackgroundProcessing() async {
+        resumeAfterForeground()
+        await waitForCurrentTask()
+    }
+
+    public func waitForCurrentTask() async {
+        if let workerTask { await workerTask.value }
+    }
+
+    public func cancelForBackgroundExpiration() {
+        workerTask?.cancel()
     }
 
     public func resumeAfterForeground() {

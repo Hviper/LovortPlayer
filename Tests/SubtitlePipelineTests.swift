@@ -46,6 +46,11 @@ final class SubtitlePipelineTests: XCTestCase {
         XCTAssertFalse(SubtitleTaskPhase.failed.isActive)
     }
 
+    func testMacTasksRemainEligibleWhileLocalTasksSuspendForBackground() {
+        XCTAssertTrue(SubtitleTaskManager.shouldSuspendForBackground(engine: .localWhisperKit))
+        XCTAssertFalse(SubtitleTaskManager.shouldSuspendForBackground(engine: .lanMac))
+    }
+
     func testSubtitleTaskProgressWeightsTranscriptionAndTranslation() {
         let now = Date()
         let item = SubtitleTaskItem(
