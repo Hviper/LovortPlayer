@@ -70,9 +70,17 @@ public struct SubtitleTaskItem: Identifiable, Codable, Sendable {
     public var overallProgress: Double {
         switch phase {
         case .completed: return 1
-        case .sourceReady: return transcriptionProgress
+        case .sourceReady: return min(0.99, transcriptionProgress * 0.72 + translationProgress * 0.28)
         default: return min(0.99, transcriptionProgress * 0.72 + translationProgress * 0.28)
         }
+    }
+
+    public var requiresNetworkConnectivity: Bool {
+        if engine == .lanMac { return true }
+        if engine == .cloudOpenAI || engine == .cloudAntigravity { return true }
+        if translationProvider != .apple { return true }
+        if enhanceWithGPT { return true }
+        return false
     }
 
     func matchesConfiguration(
@@ -102,6 +110,22 @@ public final class SubtitleTaskManager: ObservableObject {
     nonisolated public static func shouldSuspendForBackground(engine: AISubtitleEngineType) -> Bool {
         engine != .lanMac
     }
+
+    nonisolated public static func requiresNetworkConnectivity(for tasks: [SubtitleTaskItem]) -> Bool {
+        tasks.contains { $0.requiresNetworkConnectivity }
+    }
+
+    public var hasPendingWork: Bool {
+        tasks.contains { $0.phase.isActive || $0.phase == .queued || $0.phase == .pausedBySystem }
+    }
+
+    public var requiresNetworkConnectivityForPendingWork: Bool {
+        let pending = tasks.filter { $0.phase.isActive || $0.phase == .queued || $0.phase == .pausedBySystem }
+        return Self.requiresNetworkConnectivity(for: pending)
+    }
+
+    public var onBackgroundRescheduleNeeded: (@MainActor () -> Void)?
+    private var isSuspendedForBackground: Bool = false
 
     @Published public private(set) var tasks: [SubtitleTaskItem] = []
     @Published public private(set) var liveSubtitles: [String: [SubtitleLine]] = [:]
@@ -138,7 +162,7 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     public func subtitles(for videoURL: URL) -> [SubtitleLine]? {
-        if (videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")), !VaultManager.shared.isUnlocked { return nil }
+        if AISubtitleCoordinator.isPrivateVideo(url: videoURL), !VaultManager.shared.isUnlocked { return nil }
         if let live = liveSubtitles[videoKey(videoURL)], !live.isEmpty { return live }
         return AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: videoURL)
     }
@@ -230,10 +254,11 @@ public final class SubtitleTaskManager: ObservableObject {
             return tasks[existingIndex].id
         }
 
+        let isPrivateVideo = AISubtitleCoordinator.isPrivateVideo(url: videoURL, isExplicitlyPrivate: isPrivate)
         let item = SubtitleTaskItem(
             id: UUID(),
             videoURL: videoURL,
-            videoTitle: isPrivate ? "私密视频" : videoTitle,
+            videoTitle: isPrivateVideo ? "私密视频" : videoTitle,
             phase: .queued,
             statusText: "等待开始",
             transcriptionProgress: 0,
@@ -250,7 +275,7 @@ public final class SubtitleTaskManager: ObservableObject {
             translationProvider: selectedProvider,
             openAIConfiguration: openAIConfiguration,
             enhanceWithGPT: selectedEnhancement,
-            isPrivate: isPrivate,
+            isPrivate: isPrivateVideo,
             preferredStartTime: preferredStartTime,
             createdAt: Date(),
             updatedAt: Date(),
@@ -357,6 +382,7 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     private func pumpQueue() {
+        guard !isSuspendedForBackground else { return }
         guard workerTask == nil,
               let next = tasks
                 .filter({ $0.phase == .queued })
@@ -386,6 +412,8 @@ public final class SubtitleTaskManager: ObservableObject {
         }
 
         do {
+            let isPrivate = AISubtitleCoordinator.isPrivateVideo(url: snapshot.videoURL, isExplicitlyPrivate: snapshot.isPrivate)
+            try AISubtitleCoordinator.validateEngineForVideo(engine: snapshot.engine, isPrivate: isPrivate)
             guard !requiresOpenAIConfiguration(snapshot)
                     || snapshot.openAIConfiguration?.credentialFingerprint != nil else {
                 throw NSError(
@@ -519,11 +547,16 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     public func pausePrivateTasks() {
-        for task in tasks where task.isPrivate == true && task.phase.isActive { pause(task.id) }
-        for task in tasks where task.isPrivate == true { liveSubtitles[videoKey(task.videoURL)] = nil }
+        for task in tasks where AISubtitleCoordinator.isPrivateVideo(url: task.videoURL, isExplicitlyPrivate: task.isPrivate) && task.phase.isActive {
+            pause(task.id)
+        }
+        for task in tasks where AISubtitleCoordinator.isPrivateVideo(url: task.videoURL, isExplicitlyPrivate: task.isPrivate) {
+            liveSubtitles[videoKey(task.videoURL)] = nil
+        }
     }
 
     public func suspendForBackground() {
+        isSuspendedForBackground = true
         // A Mac job is already durable on the Mac; keep the client free to reconnect later.
         let activeIDs = tasks.filter { $0.phase.isActive && Self.shouldSuspendForBackground(engine: $0.engine) }.map(\.id)
         for id in activeIDs {
@@ -544,10 +577,29 @@ public final class SubtitleTaskManager: ObservableObject {
         flushTasks()
     }
 
-    /// Runs one queued task while the system has granted a BGProcessingTask window.
+    /// Runs queued tasks while the system has granted a BGProcessingTask window.
     public func runForBackgroundProcessing() async {
+        isSuspendedForBackground = false
         resumeAfterForeground()
-        await waitForCurrentTask()
+
+        while !isSuspendedForBackground {
+            if let worker = workerTask {
+                await worker.value
+            } else if tasks.contains(where: { $0.phase == .queued }) {
+                pumpQueue()
+                if let worker = workerTask {
+                    await worker.value
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+
+        if hasPendingWork {
+            onBackgroundRescheduleNeeded?()
+        }
     }
 
     public func waitForCurrentTask() async {
@@ -555,10 +607,29 @@ public final class SubtitleTaskManager: ObservableObject {
     }
 
     public func cancelForBackgroundExpiration() {
+        isSuspendedForBackground = true
+        // The Mac-side job is durable and may continue, but all phone-side work,
+        // including LAN polling, must stop when iOS revokes the processing window.
+        let activeIDs = tasks.filter(\.phase.isActive).map(\.id)
+        for id in activeIDs {
+            guard let index = index(of: id) else { continue }
+            tasks[index].phase = .pausedBySystem
+            tasks[index].statusText = tasks[index].engine == .lanMac
+                ? "Mac 继续转写，系统下次唤醒或返回 App 后领取结果"
+                : "后台处理时间已结束，将从检查点继续"
+            tasks[index].updatedAt = Date()
+            runTokens[id] = nil
+            runPermits[id]?.invalidate()
+        }
         workerTask?.cancel()
+        flushTasks()
+        if hasPendingWork {
+            onBackgroundRescheduleNeeded?()
+        }
     }
 
     public func resumeAfterForeground() {
+        isSuspendedForBackground = false
         for index in tasks.indices where tasks[index].phase == .pausedBySystem {
             tasks[index].phase = .queued
             tasks[index].statusText = "正在从已保存进度继续"

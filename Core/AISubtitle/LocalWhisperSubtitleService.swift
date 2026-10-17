@@ -623,12 +623,7 @@ public actor LocalWhisperSubtitleService {
             throw serviceError("无法创建离线音频分片")
         }
         try? FileManager.default.removeItem(at: outputURL)
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = .m4a
-        await exportSession.export()
-        guard exportSession.status == .completed else {
-            throw exportSession.error ?? serviceError("离线音频分片导出失败")
-        }
+        try await exportSession.export(to: outputURL, as: .m4a)
     }
 
     private func serviceError(_ message: String) -> NSError {

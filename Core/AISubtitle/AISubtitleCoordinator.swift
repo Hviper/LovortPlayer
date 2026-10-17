@@ -146,16 +146,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
             )
         }
         try? FileManager.default.removeItem(at: outputAudioURL)
-        exportSession.outputURL = outputAudioURL
-        exportSession.outputFileType = .m4a
-        await exportSession.export()
-        guard exportSession.status == .completed else {
-            throw exportSession.error ?? NSError(
-                domain: "AudioExtractError",
-                code: -4,
-                userInfo: [NSLocalizedDescriptionKey: "音轨导出失败"]
-            )
-        }
+        try await exportSession.export(to: outputAudioURL, as: .m4a)
     }
 
     public func loadLocalSRTIfAvailable(for videoURL: URL) -> [SubtitleLine]? {
@@ -183,6 +174,37 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         return try store.save(document, for: url)
     }
 
+    public static func isPrivateVideo(url: URL, isExplicitlyPrivate: Bool? = nil) -> Bool {
+        isExplicitlyPrivate == true
+            || url.pathExtension.lowercased() == "vault"
+            || url.path.contains("/.Vault/")
+    }
+
+    public static func validateEngineForVideo(engine: AISubtitleEngineType, isPrivate: Bool) throws {
+        if isPrivate && engine != .localWhisperKit {
+            switch engine {
+            case .lanMac:
+                throw NSError(
+                    domain: "Subtitle",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "私密视频暂不支持发送音轨到 Mac，请选择本机离线转写"]
+                )
+            case .cloudOpenAI, .cloudAntigravity:
+                throw NSError(
+                    domain: "Subtitle",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "私密视频暂不支持云端转写，请选择本机离线转写"]
+                )
+            default:
+                throw NSError(
+                    domain: "Subtitle",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "私密视频仅支持本机离线 WhisperKit 转写"]
+                )
+            }
+        }
+    }
+
     public func processVideo(
         videoURL: URL,
         targetLanguage: String = "中文 (简体)",
@@ -202,13 +224,10 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
         onEvent: (@Sendable (SubtitleProgressEvent) -> Void)? = nil,
         cachePermit: SubtitleRunPermit? = nil
     ) async throws -> [SubtitleLine] {
-        let privateVideo = isPrivate || videoURL.pathExtension == "vault" || videoURL.path.contains("/.Vault/")
+        let privateVideo = Self.isPrivateVideo(url: videoURL, isExplicitlyPrivate: isPrivate)
         if privateVideo, !(await VaultManager.shared.isUnlocked) { throw NSError(domain: "Subtitle", code: 1, userInfo: [NSLocalizedDescriptionKey: "请先解锁保险箱"]) }
         let selectedEngine = engine ?? currentEngine
-        if privateVideo && selectedEngine == .lanMac {
-            throw NSError(domain: "Subtitle", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "私密视频暂不支持发送音轨到 Mac，请选择本机离线转写"])
-        }
+        try Self.validateEngineForVideo(engine: selectedEngine, isPrivate: privateVideo)
         let selectedModel = model ?? offlineModel
         let selectedTranslationProvider = effectiveTranslationProvider(translationProvider ?? self.translationProvider)
         let translationSettings = TranslationAPISettings(provider: selectedTranslationProvider)
@@ -666,13 +685,7 @@ public final class AISubtitleCoordinator: @unchecked Sendable {
                           userInfo: [NSLocalizedDescriptionKey: "无法导出预览音频"])
         }
         try? FileManager.default.removeItem(at: outputURL)
-        exporter.outputURL = outputURL
-        exporter.outputFileType = .m4a
-        await exporter.export()
-        guard exporter.status == .completed else {
-            throw exporter.error ?? NSError(domain: "SubtitlePreview", code: -7,
-                                            userInfo: [NSLocalizedDescriptionKey: "预览音频导出失败"])
-        }
+        try await exporter.export(to: outputURL, as: .m4a)
     }
 
     private func isNoSpeechError(_ error: Error) -> Bool {

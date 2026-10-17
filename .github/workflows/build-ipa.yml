@@ -6,6 +6,38 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-mac:
+    name: Build Mac Subtitle Service
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE_PATH"
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode Project
+        run: xcodegen generate
+      - name: Test Mac Service App
+        run: |
+          xcodebuild test -project LovortPlayer.xcodeproj \
+            -scheme LovortMacSubtitleService -destination 'platform=macOS' \
+            -derivedDataPath build/MacDerivedData CODE_SIGNING_ALLOWED=NO
+      - name: Build Mac Service App
+        run: |
+          xcodebuild build -project LovortPlayer.xcodeproj \
+            -scheme LovortMacSubtitleService -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath build/MacDerivedData \
+            CODE_SIGNING_ALLOWED=NO
+          ditto -c -k --keepParent build/MacDerivedData/Build/Products/Release/LovortMacSubtitleService.app LovortMacSubtitleService.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LovortMacSubtitleService
+          path: LovortMacSubtitleService.zip
+          retention-days: 7
   build:
     name: Build & Package IPA
     runs-on: macos-15

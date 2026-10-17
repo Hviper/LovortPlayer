@@ -17,6 +17,11 @@ MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 MODEL_LOCK = threading.Lock()
 
 
+def _tool_path(name: str) -> str:
+    """Use GUI-provided absolute tools when available; keep CLI compatibility."""
+    return os.environ.get(f"LOVORT_{name.upper()}", name)
+
+
 class JobStore:
     def __init__(self, directory: Path):
         self.directory = directory
@@ -105,7 +110,7 @@ class JobStore:
                 if job is None or not audio.is_file():
                     raise FileNotFoundError("Uploaded audio is missing")
                 duration = float(subprocess.check_output([
-                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    _tool_path("ffprobe"), "-v", "error", "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1", str(audio)
                 ], text=True).strip())
                 if not math.isfinite(duration) or duration <= 0:
@@ -127,7 +132,7 @@ class JobStore:
                     with tempfile.TemporaryDirectory(prefix="lovort-job-") as directory:
                         clip = Path(directory) / "clip.wav"
                         subprocess.run([
-                            "ffmpeg", "-loglevel", "error", "-ss", str(start),
+                            _tool_path("ffmpeg"), "-loglevel", "error", "-ss", str(start),
                             "-i", str(audio), "-t", str(length), "-vn", "-ac", "1",
                             "-ar", "16000", "-y", str(clip)
                         ], check=True, timeout=180)

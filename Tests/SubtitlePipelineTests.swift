@@ -295,6 +295,173 @@ final class SubtitlePipelineTests: XCTestCase {
 
         XCTAssertEqual(order, [4, 1, 5, 0])
     }
+
+    func testSourceReadyProgressDoesNotShowOneHundredPercent() {
+        let now = Date()
+        var item = SubtitleTaskItem(
+            id: UUID(),
+            videoURL: URL(fileURLWithPath: "/tmp/sample.mp4"),
+            videoTitle: "sample.mp4",
+            phase: .sourceReady,
+            statusText: "原文字幕已生成；翻译尚未完成",
+            transcriptionProgress: 1.0,
+            translationProgress: 0.0,
+            completedChunks: 10,
+            totalChunks: 10,
+            translatedBatches: 0,
+            totalTranslationBatches: 5,
+            lineCount: 100,
+            sourceLanguage: .english,
+            targetLanguage: "中文 (简体)",
+            engine: .localWhisperKit,
+            model: .balanced,
+            translationProvider: .apple,
+            enhanceWithGPT: false,
+            isPrivate: false,
+            preferredStartTime: 0,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: nil,
+            errorMessage: nil
+        )
+
+        // When translation has not started, overallProgress is 72%
+        XCTAssertEqual(item.overallProgress, 0.72, accuracy: 0.001)
+        XCTAssertLessThan(item.overallProgress, 1.0)
+
+        // When translation is partially completed
+        item.translationProgress = 0.5
+        XCTAssertEqual(item.overallProgress, 0.86, accuracy: 0.001)
+        XCTAssertLessThan(item.overallProgress, 1.0)
+
+        // Even if translationProgress approaches 1.0 while still in .sourceReady, it must be capped and not show 100%
+        item.translationProgress = 1.0
+        XCTAssertEqual(item.overallProgress, 0.99, accuracy: 0.001)
+        XCTAssertLessThan(item.overallProgress, 1.0)
+
+        // Only .completed phase shows 100%
+        item.phase = .completed
+        XCTAssertEqual(item.overallProgress, 1.0)
+    }
+
+    func testNetworkConnectivityPolicyForPendingWork() {
+        let now = Date()
+        func makeItem(
+            engine: AISubtitleEngineType = .localWhisperKit,
+            provider: SubtitleTranslationProviderType = .apple,
+            enhance: Bool = false
+        ) -> SubtitleTaskItem {
+            SubtitleTaskItem(
+                id: UUID(),
+                videoURL: URL(fileURLWithPath: "/tmp/test.mp4"),
+                videoTitle: "test.mp4",
+                phase: .queued,
+                statusText: "排队中",
+                transcriptionProgress: 0,
+                translationProgress: 0,
+                completedChunks: 0,
+                totalChunks: 10,
+                translatedBatches: 0,
+                totalTranslationBatches: 5,
+                lineCount: 0,
+                sourceLanguage: .japanese,
+                targetLanguage: "中文 (简体)",
+                engine: engine,
+                model: .balanced,
+                translationProvider: provider,
+                enhanceWithGPT: enhance,
+                isPrivate: false,
+                preferredStartTime: 0,
+                createdAt: now,
+                updatedAt: now,
+                completedAt: nil,
+                errorMessage: nil
+            )
+        }
+
+        // Purely local WhisperKit + Apple translation does not require network
+        let localItem = makeItem(engine: .localWhisperKit, provider: .apple, enhance: false)
+        XCTAssertFalse(localItem.requiresNetworkConnectivity)
+
+        // LAN Mac requires network
+        let lanItem = makeItem(engine: .lanMac, provider: .apple, enhance: false)
+        XCTAssertTrue(lanItem.requiresNetworkConnectivity)
+
+        // Cloud OpenAI requires network
+        let cloudOpenAIItem = makeItem(engine: .cloudOpenAI, provider: .apple, enhance: false)
+        XCTAssertTrue(cloudOpenAIItem.requiresNetworkConnectivity)
+
+        // Cloud Antigravity requires network
+        let cloudAntigravityItem = makeItem(engine: .cloudAntigravity, provider: .apple, enhance: false)
+        XCTAssertTrue(cloudAntigravityItem.requiresNetworkConnectivity)
+
+        // Non-Apple translation requires network
+        let deepLItem = makeItem(engine: .localWhisperKit, provider: .deepL, enhance: false)
+        XCTAssertTrue(deepLItem.requiresNetworkConnectivity)
+
+        let openAIProviderItem = makeItem(engine: .localWhisperKit, provider: .openAI, enhance: false)
+        XCTAssertTrue(openAIProviderItem.requiresNetworkConnectivity)
+
+        // GPT enhancement requires network
+        let gptEnhancedItem = makeItem(engine: .localWhisperKit, provider: .apple, enhance: true)
+        XCTAssertTrue(gptEnhancedItem.requiresNetworkConnectivity)
+
+        // Aggregated collection checks
+        XCTAssertFalse(SubtitleTaskManager.requiresNetworkConnectivity(for: []))
+        XCTAssertFalse(SubtitleTaskManager.requiresNetworkConnectivity(for: [localItem]))
+        XCTAssertTrue(SubtitleTaskManager.requiresNetworkConnectivity(for: [localItem, lanItem]))
+        XCTAssertTrue(SubtitleTaskManager.requiresNetworkConnectivity(for: [localItem, deepLItem]))
+        XCTAssertTrue(SubtitleTaskManager.requiresNetworkConnectivity(for: [localItem, gptEnhancedItem]))
+    }
+
+    func testPrivateVideoOnlyAllowsLocalWhisperKit() {
+        // Non-private video allows all engines
+        XCTAssertNoThrow(try AISubtitleCoordinator.validateEngineForVideo(engine: .localWhisperKit, isPrivate: false))
+        XCTAssertNoThrow(try AISubtitleCoordinator.validateEngineForVideo(engine: .lanMac, isPrivate: false))
+        XCTAssertNoThrow(try AISubtitleCoordinator.validateEngineForVideo(engine: .cloudOpenAI, isPrivate: false))
+        XCTAssertNoThrow(try AISubtitleCoordinator.validateEngineForVideo(engine: .cloudAntigravity, isPrivate: false))
+
+        // Private video ONLY allows local WhisperKit
+        XCTAssertNoThrow(try AISubtitleCoordinator.validateEngineForVideo(engine: .localWhisperKit, isPrivate: true))
+
+        // LAN Mac is rejected for private video
+        XCTAssertThrowsError(try AISubtitleCoordinator.validateEngineForVideo(engine: .lanMac, isPrivate: true)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("Mac"))
+        }
+
+        // Cloud OpenAI is rejected for private video
+        XCTAssertThrowsError(try AISubtitleCoordinator.validateEngineForVideo(engine: .cloudOpenAI, isPrivate: true)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("云端"))
+        }
+
+        // Cloud Antigravity is rejected for private video
+        XCTAssertThrowsError(try AISubtitleCoordinator.validateEngineForVideo(engine: .cloudAntigravity, isPrivate: true)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("云端"))
+        }
+
+        // Private video identification helper
+        XCTAssertTrue(AISubtitleCoordinator.isPrivateVideo(url: URL(fileURLWithPath: "/media/vault.mp4"), isExplicitlyPrivate: true))
+        XCTAssertTrue(AISubtitleCoordinator.isPrivateVideo(url: URL(fileURLWithPath: "/media/video.vault"), isExplicitlyPrivate: false))
+        XCTAssertTrue(AISubtitleCoordinator.isPrivateVideo(url: URL(fileURLWithPath: "/app/Documents/.Vault/clip.mp4"), isExplicitlyPrivate: false))
+        XCTAssertFalse(AISubtitleCoordinator.isPrivateVideo(url: URL(fileURLWithPath: "/media/normal.mp4"), isExplicitlyPrivate: false))
+    }
+
+    @MainActor
+    func testVaultReadableFileCleanupRemovesTrackedFilesAndDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LovortPlayerVaultCleanup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let readableFile = directory.appendingPathComponent("decrypted-video.mp4")
+        try Data("sensitive".utf8).write(to: readableFile)
+
+        VaultManager.removeReadableFiles([readableFile], directory: directory)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: readableFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
 }
 
 private actor LANMacRetryAttemptCounter {

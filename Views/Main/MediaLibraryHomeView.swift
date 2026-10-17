@@ -282,17 +282,21 @@ public struct MediaLibraryHomeView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     if selectedVideo?.isHidden == true { selectedVideo = nil }
+                    subtitleTasks.pausePrivateTasks()
+                    subtitleTasks.suspendForBackground()
                     vault.lockVault()
                     showVaultUnlocked = false
                     if filterTab == 2 { filterTab = 0 }
-                    subtitleTasks.pausePrivateTasks()
-                    subtitleTasks.suspendForBackground()
                     PlaybackHistoryManager.shared.flush()
                     MediaIdentityStore.shared.flush()
                 }
             }
             .onChange(of: filterTab) { old, new in
-                if old == 2, new != 2 { vault.lockVault(); showVaultUnlocked = false; subtitleTasks.pausePrivateTasks() }
+                if old == 2, new != 2 {
+                    subtitleTasks.pausePrivateTasks()
+                    vault.lockVault()
+                    showVaultUnlocked = false
+                }
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
@@ -442,7 +446,14 @@ public struct MediaLibraryHomeView: View {
                     Text("名称").tag("name")
                     Text("最近播放").tag("recent")
                 }
-                if filterTab == 2 { Button("锁定保险箱") { vault.lockVault(); showVaultUnlocked = false; filterTab = 0 } }
+                if filterTab == 2 {
+                    Button("锁定保险箱") {
+                        subtitleTasks.pausePrivateTasks()
+                        vault.lockVault()
+                        showVaultUnlocked = false
+                        filterTab = 0
+                    }
+                }
             } label: { Image(systemName: "arrow.up.arrow.down").foregroundColor(.white).frame(width: 36, height: 36) }
 
             // 设置按钮

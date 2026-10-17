@@ -5,6 +5,7 @@ options:
   transitivelyLinkDependencies: true
   deploymentTarget:
     iOS: "18.0"
+    macOS: "15.0"
 packages:
   whisperkit:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
@@ -60,6 +61,34 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+  LovortMacSubtitleService:
+    type: application
+    platform: macOS
+    sources: [MacApp]
+    resources:
+      - MacSubtitleService/server.py
+      - MacSubtitleService/jobs.py
+      - MacSubtitleService/requirements.txt
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hviper.lovortmacsubtitleservice
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "LovortMacSubtitleService"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        ENABLE_HARDENED_RUNTIME: "NO"
+  LovortMacSubtitleServiceTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [MacAppTests]
+    dependencies:
+      - target: LovortMacSubtitleService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hviper.lovortmacsubtitleservice.tests
+        GENERATE_INFOPLIST_FILE: YES
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        CODE_SIGNING_ALLOWED: "NO"
 schemes:
   LovortPlayer:
     build:
@@ -68,3 +97,10 @@ schemes:
         LovortPlayerTests: [test]
     test:
       targets: [LovortPlayerTests]
+  LovortMacSubtitleService:
+    build:
+      targets:
+        LovortMacSubtitleService: all
+        LovortMacSubtitleServiceTests: [test]
+    test:
+      targets: [LovortMacSubtitleServiceTests]

@@ -94,7 +94,18 @@ public final class VaultManager: ObservableObject {
             return (success, nil)
         } catch { return (false, error.localizedDescription) }
     }
-    public func lockVault() { session = UUID(); isUnlocked = false; isDecoyMode = false }
+    public func lockVault() {
+        SubtitleTaskManager.shared.pausePrivateTasks()
+        session = UUID()
+        isUnlocked = false
+        isDecoyMode = false
+        Self.removeReadableFiles(readableFiles, directory: readableDirectory)
+        readableFiles.removeAll()
+    }
+    static func removeReadableFiles(_ files: Set<URL>, directory: URL) {
+        for file in files { try? FileManager.default.removeItem(at: file) }
+        try? FileManager.default.removeItem(at: directory)
+    }
     public func exportBackupSecrets() throws -> BackupVaultSecrets {
         guard !hasPassword || isUnlocked else { throw error("请先解锁保险箱再备份") }
         return BackupVaultSecrets(masterKey: readKeychain(keyTag), pinRecord: readKeychain(pinTag))

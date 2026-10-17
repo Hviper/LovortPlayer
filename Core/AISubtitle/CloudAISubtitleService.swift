@@ -402,17 +402,12 @@ public final class CloudAISubtitleService: @unchecked Sendable {
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
             throw serviceError("无法创建云端音频分片")
         }
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = .m4a
         exportSession.timeRange = CMTimeRange(
             start: CMTime(seconds: start, preferredTimescale: 600),
             duration: CMTime(seconds: duration, preferredTimescale: 600)
         )
         try? FileManager.default.removeItem(at: outputURL)
-        await exportSession.export()
-        guard exportSession.status == .completed else {
-            throw exportSession.error ?? serviceError("云端音频分片导出失败")
-        }
+        try await exportSession.export(to: outputURL, as: .m4a)
     }
 
     private func createProxyAwareSession(connectionTest: Bool = false) -> URLSession {

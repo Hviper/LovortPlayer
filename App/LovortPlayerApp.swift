@@ -14,6 +14,9 @@ struct LovortPlayerApp: App {
         PhotoImportStaging.removeAbandoned()
         PlayerViewModel.removeAbandonedPrivateClips()
         #if os(iOS)
+        SubtitleTaskManager.shared.onBackgroundRescheduleNeeded = {
+            Self.scheduleSubtitleBackgroundTask()
+        }
         registerSubtitleBackgroundTask()
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -37,18 +40,33 @@ struct LovortPlayerApp: App {
             Task { @MainActor in
                 let manager = SubtitleTaskManager.shared
                 await manager.runForBackgroundProcessing()
-                task.setTaskCompleted(success: manager.activeTaskCount == 0)
+                let remainingWork = manager.hasPendingWork
+                if remainingWork {
+                    Self.scheduleSubtitleBackgroundTask()
+                }
+                task.setTaskCompleted(success: !remainingWork)
             }
         }
     }
 
-    private func scheduleSubtitleBackgroundTask() {
+    @MainActor
+    static func scheduleSubtitleBackgroundTask() {
+        let manager = SubtitleTaskManager.shared
+        guard manager.hasPendingWork else {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: SubtitleTaskManager.backgroundTaskIdentifier)
+            return
+        }
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: SubtitleTaskManager.backgroundTaskIdentifier)
         let request = BGProcessingTaskRequest(identifier: SubtitleTaskManager.backgroundTaskIdentifier)
-        request.requiresNetworkConnectivity = false
+        request.requiresNetworkConnectivity = manager.requiresNetworkConnectivityForPendingWork
         request.requiresExternalPower = false
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15)
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            print("[SubtitleBackgroundTask] Scheduled successfully (requiresNetwork: \(request.requiresNetworkConnectivity), earliestBeginDate: \(request.earliestBeginDate?.description ?? "nil"))")
+        } catch {
+            print("[SubtitleBackgroundTask] Scheduling failed: \(error.localizedDescription) (requiresNetwork: \(request.requiresNetworkConnectivity))")
+        }
     }
     #endif
 
@@ -61,7 +79,7 @@ struct LovortPlayerApp: App {
                     #if os(iOS)
                     PrivacyShield.shared.setVisible(phase != .active)
                     if phase == .background {
-                        scheduleSubtitleBackgroundTask()
+                        Self.scheduleSubtitleBackgroundTask()
                     } else if phase == .active {
                         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: SubtitleTaskManager.backgroundTaskIdentifier)
                         SubtitleTaskManager.shared.resumeAfterForeground()
