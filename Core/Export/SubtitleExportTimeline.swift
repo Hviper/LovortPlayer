@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SubtitleVideoExportMode: String, CaseIterable, Identifiable, Sendable {
-    case burnedIn, embedded
+    case embedded, burnedIn
     public var id: String { rawValue }
     public var title: String {
         switch self {
