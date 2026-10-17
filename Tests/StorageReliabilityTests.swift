@@ -76,6 +76,28 @@ final class StorageReliabilityTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: source), data)
         }
     }
+    func testChunkEncryptionReportsProgress() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let key = SymmetricKey(size: .bits256)
+        let source = root.appendingPathComponent("progress-src")
+        let encrypted = root.appendingPathComponent("progress-enc")
+        let output = root.appendingPathComponent("progress-out")
+        let data = Data(repeating: 0x42, count: 8 * 1024 * 1024 + 100)
+        try data.write(to: source)
+        var encryptProgress: [Double] = []
+        try VaultFileCryptor.encrypt(source: source, destination: encrypted, key: key) { pct in
+            encryptProgress.append(pct)
+        }
+        XCTAssertFalse(encryptProgress.isEmpty)
+        XCTAssertEqual(encryptProgress.last, 1.0)
+        var decryptProgress: [Double] = []
+        try VaultFileCryptor.decrypt(source: encrypted, destination: output, key: key) { pct in
+            decryptProgress.append(pct)
+        }
+        XCTAssertFalse(decryptProgress.isEmpty)
+        XCTAssertEqual(decryptProgress.last, 1.0)
+        XCTAssertEqual(try Data(contentsOf: output), data)
+    }
     func testVaultRejectsTamperingTruncationWrongKeyAndPreservesDestination() throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
         let key = SymmetricKey(size: .bits256)

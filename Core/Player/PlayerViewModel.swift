@@ -236,7 +236,7 @@ public final class PlayerViewModel: ObservableObject {
 
             // 立即解码首帧画面
             firstFrameTask = Task {
-                let frame = await Task.detached(priority: .userInteractive) { engine.decodeFrame(at: startPos) }.value
+                let frame = await Task.detached(priority: .userInitiated) { @Sendable in engine.decodeFrame(at: startPos) }.value
                 guard !Task.isCancelled, session == playbackSession else { return }
                 currentSoftwareFrame = frame
             }
@@ -403,8 +403,9 @@ public final class PlayerViewModel: ObservableObject {
                     self.saveCurrentProgress()
                 }
 
-                let decoded = await Task.detached(priority: .userInteractive) {
-                    engine.decodeFrame(at: targetTime)
+                let frameTime = targetTime
+                let decoded = await Task.detached(priority: .userInitiated) { @Sendable in
+                    engine.decodeFrame(at: frameTime)
                 }.value
 
                 if let decoded = decoded, !Task.isCancelled {
@@ -463,8 +464,9 @@ public final class PlayerViewModel: ObservableObject {
         if isAV1SoftwareMode, let engine = av1Engine {
             seekFrameTask?.cancel()
             let session = playbackSession
+            let seekTime = clamped
             seekFrameTask = Task {
-                let frame = await Task.detached(priority: .userInteractive) { engine.decodeFrame(at: clamped) }.value
+                let frame = await Task.detached(priority: .userInitiated) { @Sendable in engine.decodeFrame(at: seekTime) }.value
                 guard !Task.isCancelled, session == playbackSession else { return }
                 currentSoftwareFrame = frame
             }

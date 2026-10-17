@@ -487,6 +487,7 @@ public struct FullscreenVideoPlayerView: View {
 
                 Spacer()
 
+                #if os(iOS)
                 // 横竖屏一键旋转切换按钮
                 Button(action: toggleOrientation) {
                     Image(systemName: isLandscape ? "iphone.portrait" : "iphone.landscape")
@@ -495,6 +496,7 @@ public struct FullscreenVideoPlayerView: View {
                         .padding(8)
                         .background(Circle().fill(Color.white.opacity(0.12)))
                 }
+                #endif
             }
             .padding(.horizontal, 4)
         }

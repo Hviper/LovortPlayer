@@ -175,7 +175,7 @@ public struct MediaLibraryHomeView: View {
                             .progressViewStyle(CircularProgressViewStyle(tint: settings.themeColor.color))
                             .scaleEffect(1.4)
 
-                        Text("正在导入视频")
+                        Text(libraryManager.importStatusText.contains("私密") || libraryManager.importStatusText.contains("加密") || libraryManager.importStatusText.contains("解密") ? "正在处理私密视频" : "正在导入视频")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.white)
 

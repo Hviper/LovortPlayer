@@ -125,16 +125,16 @@ public final class VaultManager: ObservableObject {
             throw error
         }
     }
-    public func encryptFile(at source: URL, destinationURL destination: URL) async throws {
+    public func encryptFile(at source: URL, destinationURL destination: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         guard hasPassword else { throw error("请先设置保险箱密码") }
         let key = try masterKey()
-        let task = Task.detached(priority: .utility) { try VaultFileCryptor.encrypt(source: source, destination: destination, key: key) }
+        let task = Task.detached(priority: .userInitiated) { try VaultFileCryptor.encrypt(source: source, destination: destination, key: key, progress: progress) }
         try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
-    public func decryptFile(at source: URL, destinationURL destination: URL) async throws {
+    public func decryptFile(at source: URL, destinationURL destination: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws {
         guard isUnlocked else { throw error("请先解锁保险箱") }
         let key = try masterKey()
-        let task = Task.detached(priority: .utility) { try VaultFileCryptor.decrypt(source: source, destination: destination, key: key) }
+        let task = Task.detached(priority: .userInitiated) { try VaultFileCryptor.decrypt(source: source, destination: destination, key: key, progress: progress) }
         try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
     public func readableURL(for url: URL) async throws -> URL {

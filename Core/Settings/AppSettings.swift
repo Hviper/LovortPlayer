@@ -67,6 +67,7 @@ public enum AppThemeColor: String, CaseIterable, Codable {
 }
 
 // MARK: - AppSettings（全局设置，UserDefaults 持久化）
+@MainActor
 public final class AppSettings: ObservableObject {
     public static let shared = AppSettings()
 
@@ -148,7 +149,7 @@ public final class AppSettings: ObservableObject {
         }
     }
 
-    private static func calculateCacheSize() -> Int64 {
+    nonisolated private static func calculateCacheSize() -> Int64 {
         let fm = FileManager.default
         let cacheDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
         let tempDir = fm.temporaryDirectory

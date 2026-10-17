@@ -202,9 +202,16 @@ public final class MediaLibraryManager: ObservableObject {
     private var movingVideos: Set<URL> = []
 
     public func toggleHideVideo(_ video: VideoItem) async throws {
+        guard !isImporting else { throw NSError(domain: "MediaLibrary", code: 2, userInfo: [NSLocalizedDescriptionKey: "正在处理其他文件，请稍候"]) }
         let source = video.fileURL
         guard movingVideos.insert(source).inserted else { throw NSError(domain: "MediaLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: "该视频正在移动，请稍后再试"]) }
         defer { movingVideos.remove(source) }
+        isImporting = true
+        importStatusText = video.isHidden ? "正在准备移出私密文件夹…" : "正在准备移入私密文件夹…"
+        defer {
+            isImporting = false
+            importStatusText = ""
+        }
         SubtitleTaskManager.shared.pauseTasks(for: source)
         let document = SubtitleCacheStore().load(for: source)
         let identity = MediaIdentityStore.shared.id(for: source)
@@ -221,10 +228,19 @@ public final class MediaLibraryManager: ObservableObject {
                 for file in newCompanions { try? fileManager.removeItem(at: file) }
             }
         }
+        let isHiding = !video.isHidden
+        let progressHandler: @Sendable (Double) -> Void = { pct in
+            Task { @MainActor in
+                let percent = Int(pct * 100)
+                MediaLibraryManager.shared.importStatusText = isHiding
+                    ? "正在加密并移入私密文件夹 (\(percent)%)…"
+                    : "正在解密并移出私密文件夹 (\(percent)%)…"
+            }
+        }
         if video.isHidden {
-            if source.pathExtension == "vault" { try await VaultManager.shared.decryptFile(at: source, destinationURL: destination) }
+            if source.pathExtension == "vault" { try await VaultManager.shared.decryptFile(at: source, destinationURL: destination, progress: progressHandler) }
             else { try await Task.detached { try SafeFileImport.copy(source, to: destination) }.value }
-        } else { try await VaultManager.shared.encryptFile(at: source, destinationURL: destination) }
+        } else { try await VaultManager.shared.encryptFile(at: source, destinationURL: destination, progress: progressHandler) }
         createdDestination = true
         if !video.isHidden {
             let base = source.deletingPathExtension()
@@ -274,6 +290,7 @@ public final class MediaLibraryManager: ObservableObject {
             _ = try? SubtitleCacheStore().save(rebound, for: destination)
         }
         reloadLibrary()
+        showNotification(message: video.isHidden ? "已移出私密文件夹" : "已移入私密文件夹", videoURL: destination)
     }
 
     public func deleteVideo(_ video: VideoItem) {
