@@ -12,11 +12,42 @@ public struct VideoCardView: View {
 
     @State private var thumbnail: Image? = nil
     @State private var showSubtitleExport = false
+    @State private var showSubtitleWarningAlert = false
+    @State private var pendingRawExportAction: RawExportAction? = nil
     @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
     @ObservedObject private var playlists = PlaylistStore.shared
 
+    private enum RawExportAction {
+        case share, savePhotos, saveFiles
+    }
+
     private var subtitleTask: SubtitleTaskItem? {
         subtitleTasks.task(for: video.fileURL)
+    }
+
+    private var hasSubtitles: Bool {
+        if let subs = subtitleTasks.subtitles(for: video.fileURL), !subs.isEmpty { return true }
+        return AISubtitleCoordinator.shared.loadLocalSRTIfAvailable(for: video.fileURL) != nil
+    }
+
+    private func handleRawExport(_ action: RawExportAction) {
+        if hasSubtitles {
+            pendingRawExportAction = action
+            showSubtitleWarningAlert = true
+        } else {
+            performRawExport(action)
+        }
+    }
+
+    private func performRawExport(_ action: RawExportAction) {
+        switch action {
+        case .share:
+            VideoExportManager.shared.shareVideo(url: video.fileURL)
+        case .savePhotos:
+            saveToPhotoLibrary()
+        case .saveFiles:
+            VideoExportManager.shared.saveToFiles(url: video.fileURL)
+        }
     }
 
     public init(
@@ -150,21 +181,21 @@ public struct VideoCardView: View {
                         Divider()
 
                         Button {
-                            VideoExportManager.shared.shareVideo(url: video.fileURL)
+                            handleRawExport(.share)
                         } label: {
-                            Label("分享原视频", systemImage: "square.and.arrow.up")
+                            Label("仅分享原视频（无字幕）", systemImage: "square.and.arrow.up")
                         }
 
                         Button {
-                            saveToPhotoLibrary()
+                            handleRawExport(.savePhotos)
                         } label: {
-                            Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
+                            Label("仅原视频保存到相册（无字幕）", systemImage: "photo.badge.arrow.down")
                         }
 
                         Button {
-                            VideoExportManager.shared.saveToFiles(url: video.fileURL)
+                            handleRawExport(.saveFiles)
                         } label: {
-                            Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
+                            Label("仅原视频存储到“文件”（无字幕）", systemImage: "folder.badge.plus")
                         }
 
                         Divider()
@@ -210,21 +241,21 @@ public struct VideoCardView: View {
             Divider()
 
             Button {
-                VideoExportManager.shared.shareVideo(url: video.fileURL)
+                handleRawExport(.share)
             } label: {
-                Label("分享原视频", systemImage: "square.and.arrow.up")
+                Label("仅分享原视频（无字幕）", systemImage: "square.and.arrow.up")
             }
 
             Button {
-                saveToPhotoLibrary()
+                handleRawExport(.savePhotos)
             } label: {
-                Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
+                Label("仅原视频保存到相册（无字幕）", systemImage: "photo.badge.arrow.down")
             }
 
             Button {
-                VideoExportManager.shared.saveToFiles(url: video.fileURL)
+                handleRawExport(.saveFiles)
             } label: {
-                Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
+                Label("仅原视频存储到“文件”（无字幕）", systemImage: "folder.badge.plus")
             }
 
             Divider()
@@ -242,6 +273,23 @@ public struct VideoCardView: View {
         }
         .sheet(isPresented: $showSubtitleExport) {
             SubtitleVideoExportSheet(videoURL: video.fileURL, videoTitle: video.title)
+        }
+        .alert("该视频包含字幕", isPresented: $showSubtitleWarningAlert) {
+            Button("导出带字幕视频") {
+                showSubtitleExport = true
+                pendingRawExportAction = nil
+            }
+            Button("仅导出原视频（无字幕）", role: .none) {
+                if let action = pendingRawExportAction {
+                    pendingRawExportAction = nil
+                    performRawExport(action)
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingRawExportAction = nil
+            }
+        } message: {
+            Text("直接导出原视频将不附带字幕；若要在相册、微信或第三方软件中查看字幕，建议使用“导出带字幕视频”。")
         }
         .task {
             await generateThumbnail()

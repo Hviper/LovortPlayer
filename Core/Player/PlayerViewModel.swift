@@ -167,12 +167,24 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     private func loadExternalSubtitles(for url: URL, isPrivate: Bool, session: UUID) async {
-        guard let lines = await ExternalSubtitleStore.shared.load(for: url, isPrivate: isPrivate),
-              !Task.isCancelled, session == playbackSession else { return }
-        subtitles = lines
-        usesExternalSubtitles = true
-        isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
-        updateActiveSubtitle(at: currentTime)
+        if let lines = await ExternalSubtitleStore.shared.load(for: url, isPrivate: isPrivate),
+           !Task.isCancelled, session == playbackSession {
+            subtitles = lines
+            usesExternalSubtitles = true
+            isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
+            updateActiveSubtitle(at: currentTime)
+            return
+        }
+
+        // 若无外部独立字幕且当前无已加载字幕，自动检测并挂载 MP4/MOV 容器内置内嵌字幕轨
+        if subtitles.isEmpty,
+           let embedded = await EmbeddedSubtitleExtractor.extract(from: url),
+           !Task.isCancelled, session == playbackSession {
+            subtitles = embedded
+            usesExternalSubtitles = true
+            isAISubtitleEnabled = SubtitleDisplayPreferences.shared.enabled
+            updateActiveSubtitle(at: currentTime)
+        }
     }
 
     public func importExternalSubtitles(from source: URL) async throws {

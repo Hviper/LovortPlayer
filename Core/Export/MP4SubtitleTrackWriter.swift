@@ -29,6 +29,11 @@ enum MP4SubtitleTrackWriter {
         }
         let format = try formatDescription(size: size)
         let captions = AVAssetWriterInput(mediaType: .subtitle, outputSettings: nil, sourceFormatHint: format)
+        captions.extendedLanguageTag = "zh-Hans"
+        captions.marksOutputTrackAsEnabled = true
+        if let videoStream = streams.first(where: { $0.input.mediaType == .video }) {
+            captions.addTrackAssociation(withTrackOf: videoStream.input, type: "forc")
+        }
         guard writer.canAdd(captions) else { throw SubtitleVideoExportError.unsupportedVideo }
         writer.add(captions)
         guard writer.startWriting(), reader.startReading() else {

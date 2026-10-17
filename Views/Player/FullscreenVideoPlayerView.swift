@@ -38,6 +38,32 @@ public struct FullscreenVideoPlayerView: View {
     @State private var showSubtitleExport = false
     @State private var showSubtitleImporter = false
     @State private var bottomControlsHeight: CGFloat = 0
+    @State private var showSubtitleWarningAlert = false
+    @State private var pendingRawExportType: RawExportType? = nil
+
+    private enum RawExportType {
+        case share, savePhotos, saveFiles
+    }
+
+    private func handleRawExport(_ type: RawExportType) {
+        if !viewModel.subtitles.isEmpty {
+            pendingRawExportType = type
+            showSubtitleWarningAlert = true
+        } else {
+            performRawExport(type)
+        }
+    }
+
+    private func performRawExport(_ type: RawExportType) {
+        switch type {
+        case .share:
+            VideoExportManager.shared.shareVideo(url: videoURL)
+        case .savePhotos:
+            Task { await handleSaveToPhotos() }
+        case .saveFiles:
+            VideoExportManager.shared.saveToFiles(url: videoURL)
+        }
+    }
 
     public init(videoURL: URL, videoTitle: String, isPrivate: Bool = false,
                 onDismiss: @escaping () -> Void, onFinished: @escaping () -> Void = {}) {
@@ -239,7 +265,24 @@ public struct FullscreenVideoPlayerView: View {
             #endif
         }
         .sheet(isPresented: $showSubtitleExport) {
-            SubtitleVideoExportSheet(videoURL: videoURL, videoTitle: videoTitle)
+            SubtitleVideoExportSheet(videoURL: videoURL, videoTitle: videoTitle, overrideLines: viewModel.subtitles)
+        }
+        .alert("该视频包含字幕", isPresented: $showSubtitleWarningAlert) {
+            Button("导出带字幕视频") {
+                pendingRawExportType = nil
+                showSubtitleExport = true
+            }
+            Button("仅导出原视频（无字幕）", role: .none) {
+                if let type = pendingRawExportType {
+                    pendingRawExportType = nil
+                    performRawExport(type)
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingRawExportType = nil
+            }
+        } message: {
+            Text("直接导出原视频将不附带字幕；若要在相册、微信或第三方软件中查看字幕，建议使用“导出带字幕视频”。")
         }
         .sheet(isPresented: $showSubtitleTimeline) {
             SubtitleTimelineSheet(viewModel: viewModel)
@@ -386,23 +429,21 @@ public struct FullscreenVideoPlayerView: View {
                 }
                 Divider()
                 Button {
-                    VideoExportManager.shared.shareVideo(url: videoURL)
+                    handleRawExport(.share)
                 } label: {
-                    Label("分享原视频", systemImage: "square.and.arrow.up")
+                    Label("仅分享原视频（无字幕）", systemImage: "square.and.arrow.up")
                 }
 
                 Button {
-                    Task {
-                        await handleSaveToPhotos()
-                    }
+                    handleRawExport(.savePhotos)
                 } label: {
-                    Label("原视频保存到相册", systemImage: "photo.badge.arrow.down")
+                    Label("仅原视频保存到相册（无字幕）", systemImage: "photo.badge.arrow.down")
                 }
 
                 Button {
-                    VideoExportManager.shared.saveToFiles(url: videoURL)
+                    handleRawExport(.saveFiles)
                 } label: {
-                    Label("原视频存储到“文件”", systemImage: "folder.badge.plus")
+                    Label("仅原视频存储到“文件”（无字幕）", systemImage: "folder.badge.plus")
                 }
             } label: {
                 Image(systemName: "square.and.arrow.up")

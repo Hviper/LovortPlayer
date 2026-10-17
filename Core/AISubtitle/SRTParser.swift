@@ -48,19 +48,16 @@ public struct SRTParser {
         return hours * 3600 + minutes * 60 + seconds
     }
 
-    /// 将字幕数组序列化为标准 SRT 字符串（支持双语显示）
-    public static func generateSRT(from lines: [SubtitleLine]) -> String {
+    /// 将字幕数组序列化为标准 SRT 字符串（支持双语/原文/译文显示）
+    public static func generateSRT(from lines: [SubtitleLine], textMode: SubtitleExportTextMode = .bilingual) -> String {
         var srt = ""
         for (index, line) in lines.enumerated() {
             let start = formatTimestamp(line.startTime)
             let end = formatTimestamp(line.endTime)
             srt += "\(index + 1)\n"
             srt += "\(start) --> \(end)\n"
-            if let trans = line.translatedText, !trans.isEmpty {
-                srt += "\(line.originalText)\n\(trans)\n\n"
-            } else {
-                srt += "\(line.originalText)\n\n"
-            }
+            let text = textMode.text(for: line)
+            srt += "\(text)\n\n"
         }
         return srt
     }

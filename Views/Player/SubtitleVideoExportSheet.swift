@@ -7,6 +7,14 @@ import SwiftUI
 struct SubtitleVideoExportSheet: View {
     let videoURL: URL
     let videoTitle: String
+    let overrideLines: [SubtitleLine]?
+
+    init(videoURL: URL, videoTitle: String, overrideLines: [SubtitleLine]? = nil) {
+        self.videoURL = videoURL
+        self.videoTitle = videoTitle
+        self.overrideLines = overrideLines
+    }
+
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var subtitleTasks = SubtitleTaskManager.shared
@@ -21,7 +29,10 @@ struct SubtitleVideoExportSheet: View {
     @State private var savedToPhotos = false
     @State private var savingToPhotos = false
 
-    private var lines: [SubtitleLine] { subtitleTasks.subtitles(for: videoURL) ?? [] }
+    private var lines: [SubtitleLine] {
+        if let overrideLines, !overrideLines.isEmpty { return overrideLines }
+        return subtitleTasks.subtitles(for: videoURL) ?? []
+    }
 
     var body: some View {
         NavigationStack {
@@ -44,6 +55,22 @@ struct SubtitleVideoExportSheet: View {
                         ForEach(SubtitleExportTextMode.allCases) { item in Text(item.title).tag(item) }
                     }
                 }.disabled(exporting || savingToPhotos)
+
+                Section("导出独立 SRT 字幕") {
+                    Button {
+                        shareSRT(toFiles: false)
+                    } label: {
+                        Label("分享 SRT 字幕文件", systemImage: "square.and.arrow.up")
+                    }
+                    Button {
+                        shareSRT(toFiles: true)
+                    } label: {
+                        Label("存储 SRT 字幕到“文件”", systemImage: "folder.badge.plus")
+                    }
+                    Text("导出通用的 UTF-8 SRT 字幕文件，可在电脑端播放器（VLC/IINA/PotPlayer）中与原视频同名搭配自动载入。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }.disabled(lines.isEmpty || exporting || savingToPhotos)
+
                 Section {
                     if exporting {
                         ProgressView(value: progress)
@@ -52,7 +79,7 @@ struct SubtitleVideoExportSheet: View {
                         Button("取消导出", role: .destructive) { cancelExport() }
                     } else {
                         Text("可用字幕：\(lines.count) 段").font(.footnote).foregroundStyle(.secondary)
-                        Button(outputURL == nil ? "开始导出" : "重新导出") { startExport() }
+                        Button(outputURL == nil ? "开始导出视频" : "重新导出视频") { startExport() }
                             .disabled(lines.isEmpty || savingToPhotos)
                     }
                     if let errorText { Text(errorText).foregroundStyle(.red).font(.footnote) }
@@ -60,10 +87,10 @@ struct SubtitleVideoExportSheet: View {
                 if let outputURL {
                     Section("导出完成") {
                         Button { share(outputURL, toFiles: false) } label: {
-                            Label("分享字幕视频", systemImage: "square.and.arrow.up")
+                            Label("分享带字幕视频", systemImage: "square.and.arrow.up")
                         }
                         Button { share(outputURL, toFiles: true) } label: {
-                            Label("存储到“文件”", systemImage: "folder.badge.plus")
+                            Label("存储带字幕视频到“文件”", systemImage: "folder.badge.plus")
                         }
                         // Photos and messaging apps may strip soft subtitles when transcoding.
                         if mode == .burnedIn {
@@ -71,7 +98,7 @@ struct SubtitleVideoExportSheet: View {
                                 Label(savingToPhotos ? "正在保存…" : savedToPhotos ? "已保存到相册" : "保存到系统相册", systemImage: "photo.badge.arrow.down")
                             }.disabled(savingToPhotos || savedToPhotos)
                         } else {
-                            Text("内嵌字幕建议通过“文件”或 AirDrop 分享原文件；接收方播放器及转码可能影响字幕显示。")
+                            Text("内嵌字幕建议通过“文件”或 AirDrop 分享原文件；系统相册、微信等转码时可能会忽略软字幕。")
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                     }.disabled(exporting)
@@ -124,6 +151,26 @@ struct SubtitleVideoExportSheet: View {
     private func discardOutput() {
         if let outputURL { SubtitleVideoExporter.shared.retire(outputURL) }
         outputURL = nil
+    }
+
+    private func shareSRT(toFiles: Bool) {
+        let srt = SRTParser.generateSRT(from: lines, textMode: textMode)
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SRTExport-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let srtURL = tempDir.appendingPathComponent("\(videoTitle).srt")
+        do {
+            try srt.write(to: srtURL, atomically: true, encoding: .utf8)
+            let cleanup: @MainActor @Sendable () -> Void = {
+                try? FileManager.default.removeItem(at: tempDir)
+            }
+            if toFiles {
+                VideoExportManager.shared.saveToFiles(url: srtURL, completion: cleanup)
+            } else {
+                VideoExportManager.shared.shareVideo(url: srtURL, completion: cleanup)
+            }
+        } catch {
+            errorText = "导出字幕文件失败：\(error.localizedDescription)"
+        }
     }
 
     private func share(_ url: URL, toFiles: Bool) {

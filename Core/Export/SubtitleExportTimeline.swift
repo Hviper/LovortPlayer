@@ -1,13 +1,21 @@
 import Foundation
 
 public enum SubtitleVideoExportMode: String, CaseIterable, Identifiable, Sendable {
-    case embedded, burnedIn
+    case burnedIn, embedded
     public var id: String { rawValue }
-    public var title: String { self == .embedded ? "内嵌字幕（可开关）" : "烧录字幕（固定在画面）" }
+    public var title: String {
+        switch self {
+        case .burnedIn: return "烧录字幕（强烈推荐：固定在画面）"
+        case .embedded: return "内嵌字幕（软字幕：可开关）"
+        }
+    }
     public var detail: String {
-        self == .embedded
-            ? "生成带字幕轨道的 MP4，需要接收方播放器支持字幕；优先保留视频编码。"
-            : "生成画面中带字幕的 MP4，适合微信分享；字幕不能关闭，需要重新编码。"
+        switch self {
+        case .burnedIn:
+            return "【强烈推荐】将字幕直接压制在画面中。100% 兼容微信、相册、抖音及所有播放器，字幕永不丢失。"
+        case .embedded:
+            return "生成带字幕轨道的 MP4，适合电脑端专业播放器（VLC/IINA/Infuse）。注意：系统相册或微信转码时可能会忽略软字幕。"
+        }
     }
 }
 
@@ -17,7 +25,7 @@ public enum SubtitleExportTextMode: String, CaseIterable, Identifiable, Sendable
     public var title: String {
         switch self { case .bilingual: return "双语字幕"; case .original: return "原文"; case .translated: return "译文" }
     }
-    func text(for line: SubtitleLine) -> String {
+    public func text(for line: SubtitleLine) -> String {
         let original = line.originalText.trimmingCharacters(in: .whitespacesAndNewlines)
         let translated = (line.translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         switch self {
