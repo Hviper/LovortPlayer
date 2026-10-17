@@ -33,40 +33,46 @@ public final class ExternalSubtitleStore {
 
     private func persist(_ data: Data, ext: String, for videoURL: URL, isPrivate: Bool) async throws {
         let fm = FileManager.default
+        let destination = isPrivate ? privateURL(for: videoURL, ext: ext) : publicURL(for: videoURL, ext: ext)
+        try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
+        #if os(iOS)
+        try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
+        #endif
+        for other in ["json", "srt", "ass"] where other != ext {
+            let otherURL = isPrivate ? privateURL(for: videoURL, ext: other) : publicURL(for: videoURL, ext: other)
+            try? fm.removeItem(at: otherURL)
+            if isPrivate {
+                try? fm.removeItem(at: otherURL.appendingPathExtension("vault"))
+            }
+        }
         if isPrivate {
-            let destination = privateURL(for: videoURL, ext: ext)
-            let stage = fm.temporaryDirectory.appendingPathComponent("ExternalSubtitle-\(UUID().uuidString).\(ext)")
-            let encrypted = destination.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).vault")
-            try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: stage); try? fm.removeItem(at: encrypted) }
-            try data.write(to: stage, options: .atomic)
-            #if os(iOS)
-            try fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: stage.path)
-            #endif
-            try await VaultManager.shared.encryptFile(at: stage, destinationURL: encrypted)
-            if fm.fileExists(atPath: destination.path) { _ = try fm.replaceItemAt(destination, withItemAt: encrypted) }
-            else { try fm.moveItem(at: encrypted, to: destination) }
-            for other in ["json", "srt", "ass"] where other != ext { try? fm.removeItem(at: privateURL(for: videoURL, ext: other)) }
-        } else {
-            let destination = publicURL(for: videoURL, ext: ext)
-            try data.write(to: destination, options: .atomic)
-            #if os(iOS)
-            try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path)
-            #endif
-            for other in ["json", "srt", "ass"] where other != ext { try? fm.removeItem(at: publicURL(for: videoURL, ext: other)) }
+            try? fm.removeItem(at: destination.appendingPathExtension("vault"))
         }
     }
 
     public func load(for videoURL: URL, isPrivate: Bool) async -> [SubtitleLine]? {
         for ext in ["json", "srt", "ass"] {
-            let url = isPrivate ? privateURL(for: videoURL, ext: ext) : publicURL(for: videoURL, ext: ext)
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let targetURL = isPrivate ? privateURL(for: videoURL, ext: ext) : publicURL(for: videoURL, ext: ext)
+            var fileURLToRead: URL?
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                fileURLToRead = targetURL
+            } else if isPrivate {
+                let legacyVault = targetURL.appendingPathExtension("vault")
+                if FileManager.default.fileExists(atPath: legacyVault.path) {
+                    fileURLToRead = legacyVault
+                }
+            }
+            guard let url = fileURLToRead else { continue }
+            let isLegacyVault = isPrivate && url.pathExtension.lowercased() == "vault"
             let readable: URL
-            if isPrivate {
+            if isLegacyVault {
                 guard let unlocked = try? await VaultManager.shared.readableURL(for: url) else { continue }
                 readable = unlocked
-            } else { readable = url }
-            defer { if isPrivate { VaultManager.shared.releaseReadableURL(readable) } }
+            } else {
+                readable = url
+            }
+            defer { if isLegacyVault { VaultManager.shared.releaseReadableURL(readable) } }
             guard let data = try? Data(contentsOf: readable) else { continue }
             let lines: [SubtitleLine]
             if ext == "json" { lines = (try? JSONDecoder().decode([SubtitleLine].self, from: data)) ?? [] }
@@ -92,7 +98,7 @@ public final class ExternalSubtitleStore {
         return MediaLibraryManager.shared.vaultDirectory
             .appendingPathComponent(".Subtitles", isDirectory: true)
             .appendingPathComponent(identity.uuidString, isDirectory: true)
-            .appendingPathComponent("\(name).external.\(ext).vault")
+            .appendingPathComponent("\(name).external.\(ext)")
     }
 
     private func error(_ message: String) -> NSError {

@@ -262,6 +262,7 @@ public struct MediaLibraryHomeView: View {
                 VaultPasswordSetupSheet {
                     showVaultUnlocked = true
                     filterTab = 2
+                    Task { await libraryManager.migrateLegacyVaultFiles() }
                     if let pendingVaultMove {
                         Task {
                             do { try await libraryManager.toggleHideVideo(pendingVaultMove) }

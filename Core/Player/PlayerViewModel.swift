@@ -146,7 +146,8 @@ public final class PlayerViewModel: ObservableObject {
         let savedPosition = PlaybackHistoryManager.shared.getPlaybackPosition(for: url)
 
         let session = playbackSession
-        if isPrivate {
+        if isPrivate && url.pathExtension.lowercased() == "vault" {
+            // 兼容历史版本遗留的 .vault 加密文件，走临时解密通道
             loadTask = Task {
                 do {
                     let readable = try await VaultManager.shared.readableURL(for: url)
@@ -161,7 +162,7 @@ public final class PlayerViewModel: ObservableObject {
         } else {
             resolvedVideoURL = url
             configureMedia(url: url, savedPosition: savedPosition, session: session)
-            loadTask = Task { await loadExternalSubtitles(for: url, isPrivate: false, session: session) }
+            loadTask = Task { await loadExternalSubtitles(for: url, isPrivate: isPrivate, session: session) }
         }
     }
 
@@ -577,20 +578,16 @@ public final class PlayerViewModel: ObservableObject {
             return
         }
         let privateClip = currentVideoIsPrivate
-        let clipsDir = privateClip ? Self.privateClipRoot.appendingPathComponent(UUID().uuidString, isDirectory: true) : MediaLibraryManager.shared.clipsDirectory
+        let clipsDir = privateClip ? MediaLibraryManager.shared.vaultDirectory : MediaLibraryManager.shared.clipsDirectory
         isExportingClip = true
         exportMessage = "准备导出 \(segments.count) 段…"
 
         clipTask = Task {
-            defer { if privateClip { try? FileManager.default.removeItem(at: clipsDir) } }
             var completed = 0
             var reencoded = 0
             do {
-                if privateClip {
+                if !FileManager.default.fileExists(atPath: clipsDir.path) {
                     try FileManager.default.createDirectory(at: clipsDir, withIntermediateDirectories: true)
-                    #if os(iOS)
-                    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: clipsDir.path)
-                    #endif
                 }
                 let readable = try await VaultManager.shared.readableURL(for: url)
                 defer { VaultManager.shared.releaseReadableURL(readable) }
@@ -598,7 +595,7 @@ public final class PlayerViewModel: ObservableObject {
                     try Task.checkCancellation()
                     exportMessage = "正在导出第 \(index + 1)/\(segments.count) 段…"
                     let clipName = "Clip_\(UUID().uuidString).mp4"
-                    let outputURL = clipsDir.appendingPathComponent(clipName)
+                    let outputURL = SafeFileImport.availableURL(name: clipName, in: clipsDir)
                     let mode = try await LosslessClipManager.shared.exportLosslessClip(
                         assetURL: readable,
                         outputURL: outputURL,
@@ -608,11 +605,6 @@ public final class PlayerViewModel: ObservableObject {
                         strategy: clipExportStrategy
                     )
                     if mode == .reencoded { reencoded += 1 }
-                    if privateClip {
-                        defer { try? FileManager.default.removeItem(at: outputURL) }
-                        let encrypted = SafeFileImport.availableURL(name: clipName + ".vault", in: MediaLibraryManager.shared.vaultDirectory)
-                        try await VaultManager.shared.encryptFile(at: outputURL, destinationURL: encrypted)
-                    }
                     completed += 1
                 }
                 self.exportMessage = "已导出 \(completed) 段\(privateClip ? "到私密文件夹" : "到剪辑库")\(reencoded > 0 ? "，其中 \(reencoded) 段重新编码" : "，码流复制")"

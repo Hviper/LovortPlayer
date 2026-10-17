@@ -77,7 +77,12 @@ public final class VaultManager: ObservableObject {
         guard pin.count >= 6, pin.count <= 12, pin.allSatisfy({ $0.isASCII && $0.isNumber }), Date() >= blockedUntil, let record = readKeychain(pinTag), record.count == 48 else { return (false, false) }
         let derived = derivePIN(pin, salt: record.prefix(16))
         let difference = zip(derived, record.suffix(32)).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) }
-        if difference == 0 { isUnlocked = true; failures = 0; return (true, false) }
+        if difference == 0 {
+            isUnlocked = true
+            failures = 0
+            Task { await MediaLibraryManager.shared.migrateLegacyVaultFiles() }
+            return (true, false)
+        }
         failures += 1
         if failures >= 5 { blockedUntil = Date().addingTimeInterval(30); failures = 0 }
         return (false, false)
@@ -91,6 +96,9 @@ public final class VaultManager: ObservableObject {
             let success = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "解锁私密视频保险箱")
             guard token == session else { return (false, "验证已取消") }
             isUnlocked = success
+            if success {
+                Task { await MediaLibraryManager.shared.migrateLegacyVaultFiles() }
+            }
             return (success, nil)
         } catch { return (false, error.localizedDescription) }
     }
@@ -101,6 +109,7 @@ public final class VaultManager: ObservableObject {
         isDecoyMode = false
         Self.removeReadableFiles(readableFiles, directory: readableDirectory)
         readableFiles.removeAll()
+        Task { await ThumbnailStore.shared.clearMemoryOnly() }
     }
     static func removeReadableFiles(_ files: Set<URL>, directory: URL) {
         for file in files { try? FileManager.default.removeItem(at: file) }
