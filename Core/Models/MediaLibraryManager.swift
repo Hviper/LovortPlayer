@@ -206,6 +206,34 @@ public final class MediaLibraryManager: ObservableObject {
         let source = video.fileURL
         guard movingVideos.insert(source).inserted else { throw NSError(domain: "MediaLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: "该视频正在移动，请稍后再试"]) }
         defer { movingVideos.remove(source) }
+
+        let targetFolder = video.isHidden ? documentsDirectory : vaultDirectory
+        if let capacityValues = try? targetFolder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let availableBytes = capacityValues.volumeAvailableCapacityForImportantUsage {
+            let requiredBytes = video.fileSize + 50 * 1024 * 1024
+            if availableBytes < requiredBytes {
+                let requiredStr = ByteCountFormatter.string(fromByteCount: requiredBytes, countStyle: .file)
+                let availableStr = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+                throw NSError(domain: "MediaLibrary", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "存储空间不足：转移该视频需要至少 \(requiredStr) 可用空间，当前仅剩余 \(availableStr)"
+                ])
+            }
+        }
+
+        #if os(iOS)
+        var backgroundTaskID = UIBackgroundTaskIdentifier.invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "VaultVideoTransfer") {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+        defer {
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
+        }
+        #endif
+
         isImporting = true
         importStatusText = video.isHidden ? "正在准备移出私密文件夹…" : "正在准备移入私密文件夹…"
         defer {
@@ -228,10 +256,26 @@ public final class MediaLibraryManager: ObservableObject {
                 for file in newCompanions { try? fileManager.removeItem(at: file) }
             }
         }
+        final class ProgressDebouncer: @unchecked Sendable {
+            private var lastReportedPercent: Int = -1
+            private let lock = NSLock()
+            func shouldUpdate(pct: Double) -> (should: Bool, percent: Int) {
+                lock.lock()
+                defer { lock.unlock() }
+                let percent = Int(pct * 100)
+                if percent != lastReportedPercent || percent == 100 {
+                    lastReportedPercent = percent
+                    return (true, percent)
+                }
+                return (false, percent)
+            }
+        }
+        let debouncer = ProgressDebouncer()
         let isHiding = !video.isHidden
         let progressHandler: @Sendable (Double) -> Void = { pct in
+            let (shouldUpdate, percent) = debouncer.shouldUpdate(pct: pct)
+            guard shouldUpdate else { return }
             Task { @MainActor in
-                let percent = Int(pct * 100)
                 MediaLibraryManager.shared.importStatusText = isHiding
                     ? "正在加密并移入私密文件夹 (\(percent)%)…"
                     : "正在解密并移出私密文件夹 (\(percent)%)…"
